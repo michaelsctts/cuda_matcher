@@ -7,13 +7,14 @@
 #include "input.h"
 #include "matcher.h"
 
-//
 int run(int i, std::vector<std::pair<Image *, Image *>> pairs) {
+  std::cout << "thread " << i << " started" << std::endl;
   for (int i = 0; i < pairs.size(); i++) {
     featureMatching(pairs[i].first->descriptors, pairs[i].second->descriptors,
                     pairs[i].first->matches, pairs[i].first->match_scores, 0.95,
-                    -1, pairs[i].first->scores.size());
+                    -1, pairs[i].first->getNumFeatures());
   }
+  std::cout << "thread " << i << " finished" << std::endl;
   return 0;
 }
 
@@ -29,13 +30,13 @@ int main() {
   std::vector<std::pair<Image *, Image *>> pairs;
   read_pairs(pairs_filename, pairs, images_map);
 
-  std::cout << "pairs: " << pairs.size() << std::endl;
-
   std::vector<std::vector<std::pair<Image *, Image *>>> pairs_parts(
       num_threads);
   for (int i = 0; i < pairs.size(); i++) {
     pairs_parts[i % num_threads].push_back(pairs[i]);
   }
+
+  std::cout << "pairs: " << pairs.size() << std::endl;
 
   auto start = std::chrono::high_resolution_clock::now();
 

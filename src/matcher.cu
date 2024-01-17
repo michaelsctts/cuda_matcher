@@ -69,7 +69,7 @@ void featureMatching(const std::vector<float>& descriptors0,
                      std::vector<int>& matches, std::vector<float>& scores,
                      float ratio_thresh, float distance_thresh,
                      int nDescriptors) {
-    float *d_descriptors0, *d_descriptors1;
+  float *d_descriptors0, *d_descriptors1;
   cudaMalloc(&d_descriptors0, descriptors0.size() * sizeof(float));
   cudaMalloc(&d_descriptors1, descriptors1.size() * sizeof(float));
   cudaMemcpy(d_descriptors0, descriptors0.data(),
@@ -86,14 +86,23 @@ void featureMatching(const std::vector<float>& descriptors0,
 
   int threadsPerBlock = 32;
   int blocksPerGrid = (nDescriptors + threadsPerBlock - 1) / threadsPerBlock;
-
+  // we calculate the matches for the first image
   findNearestNeighbors<<<blocksPerGrid, threadsPerBlock>>>(
       d_descriptors0, d_descriptors1, d_matches0, d_scores, nDescriptors,
       ratio_thresh * ratio_thresh, distance_thresh * distance_thresh);
+
+  // cudaDeviceSynchronize();
+  // we calculate the matches for the second image
+  findNearestNeighbors<<<blocksPerGrid, threadsPerBlock>>>(
+      d_descriptors1, d_descriptors0, d_matches1, d_scores, nDescriptors,
+      ratio_thresh * ratio_thresh, distance_thresh * distance_thresh);
+
   cudaDeviceSynchronize();
 
+  // we check if the matches are mutual
   mutualCheck<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
                                                   d_matches, nDescriptors);
+
   cudaDeviceSynchronize();
 
   cudaMemcpy(matches.data(), d_matches, nDescriptors * sizeof(int),
