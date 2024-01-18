@@ -6,15 +6,15 @@
 
 #include "input.h"
 #include "matcher.h"
+#include "math.h"
 
-int run(int i, std::vector<std::pair<Image *, Image *>> pairs) {
-  std::cout << "thread " << i << " started" << std::endl;
+int run(int i, std::vector<Pair *> pairs) {
   for (int i = 0; i < pairs.size(); i++) {
-    featureMatching(pairs[i].first->descriptors, pairs[i].second->descriptors,
-                    pairs[i].first->matches, pairs[i].first->match_scores, 0.95,
-                    -1, pairs[i].first->getNumFeatures());
+    featureMatchingLegacy(
+        pairs[i]->image0->descriptors, pairs[i]->image1->descriptors,
+        pairs[i]->matches, pairs[i]->scores, std::pow(0.95f, 2),
+        pairs[i]->image0->getNumFeatures(), pairs[i]->image1->getNumFeatures());
   }
-  std::cout << "thread " << i << " finished" << std::endl;
   return 0;
 }
 
@@ -22,16 +22,15 @@ int main() {
   // TODO: argparsing
   std::string features_filename = "./features.txt";
   std::string pairs_filename = "./pairs.txt";
-  int num_threads = 4;
+  int num_threads = 6;
 
   std::vector<Image *> images;
   std::unordered_map<std::string, Image *> images_map;
   read_features(features_filename, images, images_map);
-  std::vector<std::pair<Image *, Image *>> pairs;
+  std::vector<Pair *> pairs;
   read_pairs(pairs_filename, pairs, images_map);
 
-  std::vector<std::vector<std::pair<Image *, Image *>>> pairs_parts(
-      num_threads);
+  std::vector<std::vector<Pair *>> pairs_parts(num_threads);
   for (int i = 0; i < pairs.size(); i++) {
     pairs_parts[i % num_threads].push_back(pairs[i]);
   }
@@ -52,6 +51,7 @@ int main() {
   std::chrono::duration<double, std::milli> elapsed = end - start;
 
   // TODO: save matches and scores
+  save_matches("./matches.txt", pairs);
 
   std::cout << "Elapsed time: " << elapsed.count() << " ms\n";
   std::cout << "Mean per pair: " << elapsed.count() / pairs.size() << " ms\n";

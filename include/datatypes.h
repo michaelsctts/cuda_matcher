@@ -59,4 +59,15 @@ struct Image {
   }
 };
 
+struct Pair {
+  Image* image0;
+  Image* image1;
+  std::vector<int> matches0;
+  std::vector<int> matches1;
+  std::vector<float> scores0;
+  std::vector<float> scores1;
+  std::vector<int> matches;
+  std::vector<float> scores;
+};
+
 #endif  // IMAGE_H

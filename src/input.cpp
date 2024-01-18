@@ -42,7 +42,8 @@ void read_features(std::string filename, std::vector<Image *> &images,
       std::getline(file, line);
       ss = std::stringstream(line);
       for (int j = 0; j < num_keypoints; j++) {
-        ss >> descriptors[i + j * 128];
+        // ss >> descriptors[i + j * 128];
+        ss >> descriptors[j + i * num_keypoints];
       }
     }
 
@@ -54,8 +55,8 @@ void read_features(std::string filename, std::vector<Image *> &images,
     }
 
     // allocate here so we dont allocate on matching
-    std::vector<int> matches(128 * num_keypoints, -1);
-    std::vector<float> match_scores(128 * num_keypoints);
+    std::vector<int> matches(num_keypoints, -1);
+    std::vector<float> match_scores(num_keypoints);
 
     Image *image = new Image();
 
@@ -75,8 +76,7 @@ void read_features(std::string filename, std::vector<Image *> &images,
   file.close();
 }
 
-void read_pairs(std::string filename,
-                std::vector<std::pair<Image *, Image *>> &pairs,
+void read_pairs(std::string filename, std::vector<Pair *> &pairs,
                 std::unordered_map<std::string, Image *> &images_map) {
   std::ifstream file(filename);
   std::string line;
@@ -94,8 +94,39 @@ void read_pairs(std::string filename,
       std::cout << "Error: image not found" << std::endl;
       exit(1);
     }
-    pairs.push_back(std::make_pair(image0, image1));
+    Pair *pair = new Pair();
+    pair->image0 = image0;
+    pair->image1 = image1;
+    pair->matches = std::vector<int>(image0->getNumFeatures(), -1);
+    pair->scores = std::vector<float>(image0->getNumFeatures());
+    // pair->scores0 = std::vector<float>(image0->getNumFeatures());
+    // pair->scores1 = std::vector<float>(image1->getNumFeatures());
+    pairs.push_back(pair);
   }
 
   file.close();
+}
+
+void save_matches(std::string filename, std::vector<Pair *> &pairs) {
+  // std::ofstream file(filename);
+
+  // lets start with cout
+  int count = 0;
+  int num_matches = 0;
+  for (int i = 0; i < pairs.size(); i++) {
+    Pair *pair = pairs[i];
+    Image *image0 = pair->image0;
+    Image *image1 = pair->image1;
+    // std::cout << image0->name << " " << image1->name << std::endl;
+    for (int j = 0; j < image0->getNumFeatures(); j++) {
+      count++;
+      // pair->matches[j] means kp j in image0 has match matches[j] in image1
+      if (pair->matches[j] != -1) {
+        std::cout << j << " " << pair->matches[j] << std::endl;
+        num_matches++;
+      }
+    }
+  }
+  std::cout << "num matches: " << num_matches << std::endl;
+  std::cout << "num pairs kpts: " << count << std::endl;
 }

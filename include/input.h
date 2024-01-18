@@ -10,13 +10,14 @@
 #include <unordered_map>
 #include <vector>
 
-#include "image.h"
+#include "datatypes.h"
 
 void read_features(std::string filename, std::vector<Image *> &images,
                    std::unordered_map<std::string, Image *> &images_map);
 
-void read_pairs(std::string filename,
-                std::vector<std::pair<Image *, Image *>> &pairs,
+void read_pairs(std::string filename, std::vector<Pair *> &pairs,
                 std::unordered_map<std::string, Image *> &images_map);
+
+void save_matches(std::string filename, std::vector<Pair *> &pairs);
 
 #endif  // INPUT_H
