@@ -42,8 +42,8 @@ void read_features(std::string filename, std::vector<Image *> &images,
       std::getline(file, line);
       ss = std::stringstream(line);
       for (int j = 0; j < num_keypoints; j++) {
-        // ss >> descriptors[i + j * 128];
-        ss >> descriptors[j + i * num_keypoints];
+        ss >> descriptors[i + j * 128];
+        // ss >> descriptors[j + i * num_keypoints];
       }
     }
 
