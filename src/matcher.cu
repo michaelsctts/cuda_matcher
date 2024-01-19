@@ -9,7 +9,6 @@
 namespace cg = cooperative_groups;
 
 #define BLOCK_SIZE 32
-// device funct to get top2 max using nth_element
 
 __global__ void similarityMatrixAndTranspose(
     const float* descriptors0, const float* descriptors1, int nDescriptors0,
@@ -24,7 +23,6 @@ __global__ void similarityMatrixAndTranspose(
                     descriptors1[idy * descriptorDim + i];
     }
 
-    // Store the result in both sim and its transpose simT
     sim[idx * nDescriptors1 + idy] = dotProduct;
     simT[idy * nDescriptors0 + idx] = dotProduct;
   }
@@ -50,27 +48,6 @@ __global__ void similarityMatrixAndTransposeV2(
     simT[idy * nDescriptors0 + idx] = dotProduct;
   }
 }
-/*
-mirror this:
-def find_nn(sim, ratio_thresh, distance_thresh):
-    //sim is einsum("bdn,bdm->bnm", data["descriptors0"], data["descriptors1"])
-    // so its equivalent in cuda c++ is:
-
-
-
-    sim_nn, ind_nn = sim.topk(2 if ratio_thresh else 1, dim=-1, largest=True)
-    dist_nn = 2 * (1 - sim_nn)
-    mask = torch.ones(ind_nn.shape[:-1], dtype=torch.bool, device=sim.device)
-    if ratio_thresh:
-        mask = mask & (dist_nn[..., 0] <= (ratio_thresh**2)*dist_nn[..., 1])
-    if distance_thresh:
-        mask = mask & (dist_nn[..., 0] <= distance_thresh**2)
-    matches = torch.where(mask, ind_nn[..., 0], ind_nn.new_tensor(-1))
-    scores = torch.where(mask, (sim_nn[..., 0]+1)/2, sim_nn.new_tensor(0))
-    return matches, scores
-*/
-
-// device funct to find max and second max
 
 __global__ void find_nn(const float* sim, int* matches, float* scores,
                         const int nDescriptors0, const int nDescriptors1,
@@ -346,4 +323,81 @@ void featureMatchingLegacy(const std::vector<float>& descriptors0,
   cudaFree(d_matches1);
   cudaFree(d_matches);
   cudaFree(d_scores);
+}
+
+void allocateDescriptors(float** d_descriptors,
+                         const std::vector<float>& descriptors) {
+  cudaMalloc(d_descriptors, descriptors.size() * sizeof(float));
+  cudaMemcpy(*d_descriptors, descriptors.data(),
+             descriptors.size() * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+void featureMatchingV2(const float* d_descriptors0, const float* d_descriptors1,
+                       std::vector<int>& matches, std::vector<float>& scores,
+                       float ratio_thresh_sq, int nDescriptors0,
+                       int nDescriptors1) {
+  int *d_matches0, *d_matches1, *d_matches;
+  float *d_scores, *d_scores1;
+  float* d_sim;
+  float* d_simT;
+
+  cudaMalloc(&d_matches0, nDescriptors0 * sizeof(int));
+  cudaMalloc(&d_matches1, nDescriptors1 * sizeof(int));
+  cudaMalloc(&d_matches, nDescriptors0 * sizeof(int));
+  cudaMalloc(&d_scores, nDescriptors0 * sizeof(float));
+  cudaMalloc(&d_scores1, nDescriptors1 * sizeof(float));
+  // malloc for similarity matrix
+  cudaMalloc(&d_sim, nDescriptors0 * nDescriptors1 * sizeof(float));
+  cudaMalloc(&d_simT, nDescriptors0 * nDescriptors1 * sizeof(float));
+
+  int threadsPerBlock = BLOCK_SIZE;
+  int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
+  // we calculate the matches for the first image
+
+  // similarity matrix will be nDescriptors0 x nDescriptors1
+  dim3 threadsPerBlock2D(BLOCK_SIZE, BLOCK_SIZE);
+  dim3 blocksPerGrid2D(
+      (nDescriptors0 + threadsPerBlock2D.x - 1) / threadsPerBlock2D.x,
+      (nDescriptors1 + threadsPerBlock2D.y - 1) / threadsPerBlock2D.y);
+  similarityMatrixAndTransposeV2<<<blocksPerGrid2D, threadsPerBlock2D>>>(
+      d_descriptors0, d_descriptors1, nDescriptors0, nDescriptors1, 128, d_sim,
+      d_simT);
+
+  cudaDeviceSynchronize();
+
+  // matches
+  find_nn<<<blocksPerGrid, threadsPerBlock>>>(d_sim, d_matches0, d_scores,
+                                              nDescriptors0, nDescriptors1,
+                                              ratio_thresh_sq);
+
+  // transpose
+  // otherside matches
+  int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
+
+  find_nn<<<blocksPerGridT, threadsPerBlock>>>(d_simT, d_matches1, d_scores1,
+                                               nDescriptors1, nDescriptors0,
+                                               ratio_thresh_sq);
+
+  cudaDeviceSynchronize();
+
+  // we check if the matches are mutual
+  mutualCheck<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
+                                                  d_matches, nDescriptors0);
+
+  cudaDeviceSynchronize();
+
+  cudaMemcpy(matches.data(), d_matches, nDescriptors0 * sizeof(int),
+             cudaMemcpyDeviceToHost);
+  cudaMemcpy(scores.data(), d_scores, nDescriptors0 * sizeof(float),
+             cudaMemcpyDeviceToHost);
+
+  cudaFree(d_matches0);
+
+  cudaFree(d_sim);
+  cudaFree(d_simT);
+
+  cudaFree(d_matches1);
+  cudaFree(d_matches);
+  cudaFree(d_scores);
+  cudaFree(d_scores1);
 }

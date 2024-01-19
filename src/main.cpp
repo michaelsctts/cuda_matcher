@@ -10,8 +10,8 @@
 
 int run(int i, std::vector<Pair *> pairs) {
   for (int i = 0; i < pairs.size(); i++) {
-    featureMatching(
-        pairs[i]->image0->descriptors, pairs[i]->image1->descriptors,
+    featureMatchingV2(
+        pairs[i]->image0->d_descriptors, pairs[i]->image1->d_descriptors,
         pairs[i]->matches, pairs[i]->scores, std::pow(0.95f, 2),
         pairs[i]->image0->getNumFeatures(), pairs[i]->image1->getNumFeatures());
   }

@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "matcher.h"
+
 struct Image {
   int id;
   std::string name;
@@ -19,6 +21,8 @@ struct Image {
   std::vector<float> descriptors;
   // scores are size num_keypoints
   std::vector<float> scores;
+
+  float* d_descriptors;
 
   // matches[i] indicates the index of the match for the i-th descriptor
   // if matches[i] == -1, then the i-th descriptor has no match
@@ -44,6 +48,9 @@ struct Image {
   inline int* getMatchPtr(int i) { return &matches[128 * i]; }
   inline float* getMatchScorePtr(int i) { return &match_scores[128 * i]; }
 
+  void allocateDescriptorsDevice() {
+    allocateDescriptors(&d_descriptors, descriptors);
+  }
   // TODO: setters
 
   // TODO: friend operator<< for printing

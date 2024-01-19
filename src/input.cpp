@@ -71,6 +71,8 @@ void read_features(std::string filename, std::vector<Image *> &images,
 
     images.push_back(image);
     images_map[name] = image;
+
+    image->allocateDescriptorsDevice();
   }
 
   file.close();
