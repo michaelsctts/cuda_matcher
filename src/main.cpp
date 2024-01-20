@@ -1,35 +1,64 @@
 // main.cpp
 
+#include <argparse/argparse.hpp>
 #include <chrono>
 #include <iostream>
 #include <thread>
 
 #include "input.h"
+#include "macros.h"
 #include "matcher.h"
 #include "math.h"
 
 int run(int i, std::vector<Pair *> pairs) {
   float ratio = std::pow(0.95, 2);
   for (int i = 0; i < pairs.size(); i++) {
-    featureMatchingV2(
-        pairs[i]->image0->d_descriptors, pairs[i]->image1->d_descriptors,
-        pairs[i]->matches, pairs[i]->scores, ratio,
-        pairs[i]->image0->getNumFeatures(), pairs[i]->image1->getNumFeatures());
+    featureMatching(pairs[i]->image0->d_descriptors,
+                    pairs[i]->image1->d_descriptors, pairs[i]->matches,
+                    pairs[i]->scores, ratio, pairs[i]->image0->getNumFeatures(),
+                    pairs[i]->image1->getNumFeatures());
   }
   return 0;
 }
 
-int main() {
+int main(int argc, const char **argv) {
+  // argparse
+  argparse::ArgumentParser program("cuda_matcher");
+  program.add_argument("-f", "features_path")
+      .help("path to features file")
+      .default_value(std::string("./features.txt"));
+  program.add_argument("-p", "pairs_path")
+      .help("path to pairs file")
+      .default_value(std::string("./pairs.txt"));
+
+  program.add_argument("-o", "output_path")
+      .help("path to output file")
+      .default_value(std::string("./matches.txt"));
+
+  program.add_argument("-t", "num_threads")
+      .help("number of threads")
+      .default_value(2)
+      .action([](const std::string &value) { return std::stoi(value); });
+
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::runtime_error &err) {
+    std::cout << err.what() << std::endl;
+    std::cout << program;
+    exit(0);
+  }
+
   // TODO: argparsing
-  std::string features_filename = "./features.txt";
-  std::string pairs_filename = "./pairs.txt";
-  int num_threads = 6;
+  std::string features_path = GET_ARG(features_path);
+  std::string pairs_path = GET_ARG(pairs_path);
+  std::string output_path = GET_ARG(output_path);
+  int num_threads = GET_ARG(num_threads);
 
   std::vector<Image *> images;
   std::unordered_map<std::string, Image *> images_map;
-  read_features(features_filename, images, images_map);
+  read_features(features_path, images, images_map);
   std::vector<Pair *> pairs;
-  read_pairs(pairs_filename, pairs, images_map);
+  read_pairs(pairs_path, pairs, images_map);
 
   std::vector<std::vector<Pair *>> pairs_parts(num_threads);
   for (int i = 0; i < pairs.size(); i++) {
@@ -52,7 +81,7 @@ int main() {
   std::chrono::duration<double, std::milli> elapsed = end - start;
 
   // TODO: save matches and scores
-  // save_matches("./matches.txt", pairs);
+  // save_matches(output_path, pairs);
 
   std::cout << "Elapsed time: " << elapsed.count() << " ms\n";
   std::cout << "Mean per pair: " << elapsed.count() / pairs.size() << " ms\n";

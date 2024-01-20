@@ -199,10 +199,10 @@ void allocateDescriptors(float** d_descriptors,
              descriptors.size() * sizeof(float), cudaMemcpyHostToDevice);
 }
 
-void featureMatchingV2(const float* d_descriptors0, const float* d_descriptors1,
-                       std::vector<int>& matches, std::vector<float>& scores,
-                       float ratio_thresh_sq, int nDescriptors0,
-                       int nDescriptors1) {
+void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
+                     std::vector<int>& matches, std::vector<float>& scores,
+                     float ratio_thresh_sq, int nDescriptors0,
+                     int nDescriptors1) {
   float* d_sim;
   float* d_simT;
 
