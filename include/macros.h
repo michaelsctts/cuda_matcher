@@ -6,6 +6,7 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #define ASSERT(condition, message)                                     \
@@ -70,6 +71,19 @@ static std::unordered_map<int, std::chrono::high_resolution_clock::time_point>
     } else {                                                           \
       std::cout << "Timer ID " << id << " not found." << std::endl;    \
     }                                                                  \
+  } while (0)
+
+static std::unordered_map<int, std::thread> threadsMap;
+
+// if i want to parallelize a function like sum(a,b,c,d) i can do:
+// parallel_run(sum(a,b,c,d), 0)
+#define parallel_run(call, th)          \
+  do {                                  \
+    threadsMap[th] = std::thread(call); \
+  } while (0)
+#define parallel_join(th)  \
+  do {                     \
+    threadsMap[th].join(); \
   } while (0)
 
 #endif  // MACROS_H

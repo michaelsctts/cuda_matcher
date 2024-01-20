@@ -124,11 +124,12 @@ void save_matches(std::string filename, std::vector<Pair *> &pairs) {
       count++;
       // pair->matches[j] means kp j in image0 has match matches[j] in image1
       if (pair->matches[j] != -1) {
-        std::cout << j << " " << pair->matches[j] << std::endl;
+        // std::cout << j << " " << pair->matches[j] << std::endl;
         num_matches++;
       }
     }
   }
-  std::cout << "num matches: " << num_matches << std::endl;
-  std::cout << "num pairs kpts: " << count << std::endl;
+  std::cout << "sexo" << std::endl;
+  std::cout << "num keypoints matcheados: " << num_matches << std::endl;
+  std::cout << "num keypoints totales: " << count << std::endl;
 }

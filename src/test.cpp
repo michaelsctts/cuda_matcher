@@ -1,3 +1,4 @@
+// test.cpp
 // main.cpp
 
 #include <argparse/argparse.hpp>
@@ -10,7 +11,7 @@
 #include "matcher.h"
 #include "math.h"
 
-int run(int i, std::vector<Pair *> pairs) {
+int runTest(int i, std::vector<Pair *> pairs) {
   float ratio = std::pow(0.95, 2);
   for (int i = 0; i < pairs.size(); i++) {
     featureMatching(pairs[i]->image0->d_descriptors,
@@ -21,7 +22,7 @@ int run(int i, std::vector<Pair *> pairs) {
   return 0;
 }
 
-int runSingle(int i, Pair *pair, float ratio) {
+int runSingleTest(int i, Pair *pair, float ratio) {
   featureMatching(pair->image0->d_descriptors, pair->image1->d_descriptors,
                   pair->matches, pair->scores, ratio,
                   pair->image0->getNumFeatures(),
@@ -80,7 +81,7 @@ int main(int argc, const char **argv) {
   std::vector<std::thread> threads;
   float ratio = std::pow(0.95, 2);
   for (int i = 0; i < num_threads; i++) {
-    threads.push_back(std::thread(run, i, pairs_parts[i]));
+    threads.push_back(std::thread(runTest, i, pairs_parts[i]));
   }
   for (int i = 0; i < num_threads; i++) {
     threads[i].join();

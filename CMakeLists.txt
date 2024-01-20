@@ -34,5 +34,10 @@ add_executable(matcher ${SOURCES})
 target_link_libraries(matcher ${CUDA_LIBRARIES} -lcublas -lcurand)
 target_link_libraries(matcher argparse)
 
+add_executable(test src/test.cpp src/matcher.cu src/input.cpp)
+target_link_libraries(test ${CUDA_LIBRARIES} -lcublas -lcurand)
+target_link_libraries(test argparse)
+
+
 
 
