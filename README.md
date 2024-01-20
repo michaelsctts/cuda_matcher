@@ -1,5 +1,5 @@
 
 # Cuda Matcher
 
-### Implementacion de un feature matcher en CUDA C++
+Feature matching en GPU imitando el matcher de hloc con Nearest Neighbors.
 
