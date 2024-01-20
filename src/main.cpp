@@ -9,10 +9,11 @@
 #include "math.h"
 
 int run(int i, std::vector<Pair *> pairs) {
+  float ratio = std::pow(0.95, 2);
   for (int i = 0; i < pairs.size(); i++) {
     featureMatchingV2(
         pairs[i]->image0->d_descriptors, pairs[i]->image1->d_descriptors,
-        pairs[i]->matches, pairs[i]->scores, std::pow(0.95f, 2),
+        pairs[i]->matches, pairs[i]->scores, ratio,
         pairs[i]->image0->getNumFeatures(), pairs[i]->image1->getNumFeatures());
   }
   return 0;
@@ -51,7 +52,7 @@ int main() {
   std::chrono::duration<double, std::milli> elapsed = end - start;
 
   // TODO: save matches and scores
-  save_matches("./matches.txt", pairs);
+  // save_matches("./matches.txt", pairs);
 
   std::cout << "Elapsed time: " << elapsed.count() << " ms\n";
   std::cout << "Mean per pair: " << elapsed.count() / pairs.size() << " ms\n";

@@ -1,14 +1,7 @@
-
-#include <cooperative_groups.h>
-
 #include <cfloat>
 #include <cmath>
 #include <iostream>
 #include <vector>
-
-namespace cg = cooperative_groups;
-
-#define BLOCK_SIZE 32
 
 __global__ void similarityMatrixAndTranspose(
     const float* descriptors0, const float* descriptors1, int nDescriptors0,
@@ -39,11 +32,17 @@ __global__ void similarityMatrixAndTransposeV2(
     int globalIdy = idy * descriptorDim;
 
     float dotProduct = 0.0f;
-    for (int i = 0; i < descriptorDim; ++i) {
-      dotProduct += descriptors0[globalIdx + i] * descriptors1[globalIdy + i];
+#pragma unroll 4
+    for (int i = 0; i < descriptorDim; i += 4) {
+      float4 vec0 = *((float4*)(descriptors0 + globalIdx + i));
+      float4 vec1 = *((float4*)(descriptors1 + globalIdy + i));
+
+      dotProduct += __fmaf_rn(vec0.x, vec1.x, 0.0f);
+      dotProduct += __fmaf_rn(vec0.y, vec1.y, 0.0f);
+      dotProduct += __fmaf_rn(vec0.z, vec1.z, 0.0f);
+      dotProduct += __fmaf_rn(vec0.w, vec1.w, 0.0f);
     }
 
-    // Store the result in both sim and its transpose simT
     sim[idx * nDescriptors1 + idy] = dotProduct;
     simT[idy * nDescriptors0 + idx] = dotProduct;
   }
@@ -58,6 +57,7 @@ __global__ void find_nn(const float* sim, int* matches, float* scores,
     float sim_nn0 = -1e30f;
     float sim_nn1 = -1e30f;
     int nearestNeighborIdx = -1;
+#pragma unroll 2
     for (int i = 0; i < nDescriptors1; ++i) {
       if (sim[idx * nDescriptors1 + i] > sim_nn0) {
         sim_nn1 = sim_nn0;
@@ -84,29 +84,18 @@ __global__ void find_nnV2(const float* sim, int* matches, float* scores,
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
   if (idx < nDescriptors0) {
-    // Load sim data into shared memory
-    extern __shared__ float shared_sim[];
-    for (int i = threadIdx.x; i < nDescriptors0 * nDescriptors1;
-         i += blockDim.x) {
-      shared_sim[i] = sim[i];
-    }
-    __syncthreads();
-
     float sim_nn0 = -1e30f;
     float sim_nn1 = -1e30f;
     int nearestNeighborIdx = -1;
-
-    // Find nearest neighbors using parallel reduction
     for (int i = 0; i < nDescriptors1; ++i) {
-      float sim_value = shared_sim[idx * nDescriptors1 + i];
+      float current_sim = sim[idx * nDescriptors1 + i];
 
-      // Parallel reduction for maximum similarity value and its index
-      if (sim_value > sim_nn0) {
+      if (current_sim > sim_nn0) {
         sim_nn1 = sim_nn0;
-        sim_nn0 = sim_value;
+        sim_nn0 = current_sim;
         nearestNeighborIdx = i;
-      } else if (sim_value > sim_nn1) {
-        sim_nn1 = sim_value;
+      } else if (current_sim > sim_nn1) {
+        sim_nn1 = current_sim;
       }
     }
 
@@ -116,7 +105,7 @@ __global__ void find_nnV2(const float* sim, int* matches, float* scores,
     bool validMatch = (dist_nn0 <= ratio_thresh_sq * dist_nn1);
 
     matches[idx] = (validMatch) ? nearestNeighborIdx : -1;
-    scores[idx] = (validMatch) ? ((sim_nn0 + 1) / 2.0f) : 0.0f;
+    scores[idx] = (validMatch) ? (sim_nn0 + 1) / 2.0f : 0.0f;
   }
 }
 
@@ -165,10 +154,7 @@ __global__ void findNearestNeighbors(const float* descriptors0,
     // float dist_nn0 = (2 * (1 - sim0));
     // float dist_nn1 = 2 * (1 - sim1);
 
-    // bool validMatch = true;
-    // if (ratio_thresh_sq > 0) {
     bool validMatch = ((2 * (1 - sim0)) <= ratio_thresh_sq * (2 * (1 - sim1)));
-    // }
 
     matches[idx] = (validMatch) ? nearestNeighborIdx : -1;
     scores[idx] = (validMatch) ? (sim0 + 1) / 2.0f : 0.0f;
@@ -185,144 +171,25 @@ __global__ void mutualCheck(const int* matches0, const int* matches1,
   }
 }
 
-void featureMatching(const std::vector<float>& descriptors0,
-                     const std::vector<float>& descriptors1,
-                     std::vector<int>& matches, std::vector<float>& scores,
-                     float ratio_thresh_sq, int nDescriptors0,
-                     int nDescriptors1) {
-  float *d_descriptors0, *d_descriptors1;
-  int *d_matches0, *d_matches1, *d_matches;
-  float *d_scores, *d_scores1;
-  float* d_sim;
-  float* d_simT;
+__global__ void mutualCheckV2(int* matches0, const int* matches1,
+                              int nDescriptors) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-  cudaMalloc(&d_descriptors0, descriptors0.size() * sizeof(float));
-  cudaMalloc(&d_descriptors1, descriptors1.size() * sizeof(float));
-  cudaMemcpy(d_descriptors0, descriptors0.data(),
-             descriptors0.size() * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_descriptors1, descriptors1.data(),
-             descriptors1.size() * sizeof(float), cudaMemcpyHostToDevice);
-
-  cudaMalloc(&d_matches0, nDescriptors0 * sizeof(int));
-  cudaMalloc(&d_matches1, nDescriptors1 * sizeof(int));
-  cudaMalloc(&d_matches, nDescriptors0 * sizeof(int));
-  cudaMalloc(&d_scores, nDescriptors0 * sizeof(float));
-  cudaMalloc(&d_scores1, nDescriptors1 * sizeof(float));
-  // malloc for similarity matrix
-  cudaMalloc(&d_sim, nDescriptors0 * nDescriptors1 * sizeof(float));
-  cudaMalloc(&d_simT, nDescriptors0 * nDescriptors1 * sizeof(float));
-
-  int threadsPerBlock = BLOCK_SIZE;
-  int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
-  // we calculate the matches for the first image
-
-  // similarity matrix will be nDescriptors0 x nDescriptors1
-  dim3 threadsPerBlock2D(BLOCK_SIZE, BLOCK_SIZE);
-  dim3 blocksPerGrid2D(
-      (nDescriptors0 + threadsPerBlock2D.x - 1) / threadsPerBlock2D.x,
-      (nDescriptors1 + threadsPerBlock2D.y - 1) / threadsPerBlock2D.y);
-  similarityMatrixAndTransposeV2<<<blocksPerGrid2D, threadsPerBlock2D>>>(
-      d_descriptors0, d_descriptors1, nDescriptors0, nDescriptors1, 128, d_sim,
-      d_simT);
-
-  cudaDeviceSynchronize();
-
-  // matches
-  find_nn<<<blocksPerGrid, threadsPerBlock>>>(d_sim, d_matches0, d_scores,
-                                              nDescriptors0, nDescriptors1,
-                                              ratio_thresh_sq);
-
-  // transpose
-  // otherside matches
-  int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
-
-  find_nn<<<blocksPerGridT, threadsPerBlock>>>(d_simT, d_matches1, d_scores1,
-                                               nDescriptors1, nDescriptors0,
-                                               ratio_thresh_sq);
-
-  cudaDeviceSynchronize();
-
-  // we check if the matches are mutual
-  mutualCheck<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
-                                                  d_matches, nDescriptors0);
-
-  cudaDeviceSynchronize();
-
-  cudaMemcpy(matches.data(), d_matches, nDescriptors0 * sizeof(int),
-             cudaMemcpyDeviceToHost);
-  cudaMemcpy(scores.data(), d_scores, nDescriptors0 * sizeof(float),
-             cudaMemcpyDeviceToHost);
-
-  cudaFree(d_descriptors0);
-  cudaFree(d_descriptors1);
-  cudaFree(d_matches0);
-
-  cudaFree(d_sim);
-  cudaFree(d_simT);
-
-  cudaFree(d_matches1);
-  cudaFree(d_matches);
-  cudaFree(d_scores);
-  cudaFree(d_scores1);
+  if (idx < nDescriptors) {
+    int match1 = matches0[idx];
+    int match2 = (match1 != -1) ? matches1[match1] : -1;
+    matches0[idx] = (match2 == idx) ? match1 : -1;
+  }
 }
 
-void featureMatchingLegacy(const std::vector<float>& descriptors0,
-                           const std::vector<float>& descriptors1,
-                           std::vector<int>& matches,
-                           std::vector<float>& scores, float ratio_thresh_sq,
-                           int nDescriptors0, int nDescriptors1) {
-  float *d_descriptors0, *d_descriptors1;
-  cudaMalloc(&d_descriptors0, descriptors0.size() * sizeof(float));
-  cudaMalloc(&d_descriptors1, descriptors1.size() * sizeof(float));
-  cudaMemcpy(d_descriptors0, descriptors0.data(),
-             descriptors0.size() * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_descriptors1, descriptors1.data(),
-             descriptors1.size() * sizeof(float), cudaMemcpyHostToDevice);
+__global__ void mutualCheckV3(int* matches0, const int* matches1,
+                              int nDescriptors) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
-  int *d_matches0, *d_matches1, *d_matches;
-  float *d_scores, *d_scores1;
-
-  cudaMalloc(&d_matches0, nDescriptors0 * sizeof(int));
-  cudaMalloc(&d_matches1, nDescriptors1 * sizeof(int));
-  cudaMalloc(&d_matches, nDescriptors0 * sizeof(int));
-  cudaMalloc(&d_scores, nDescriptors0 * sizeof(float));
-  cudaMalloc(&d_scores1, nDescriptors1 * sizeof(float));
-
-  int threadsPerBlock = 32;
-  int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
-  // we calculate the matches for the first image
-  findNearestNeighbors<<<blocksPerGrid, threadsPerBlock>>>(
-      d_descriptors0, d_descriptors1, d_matches0, d_scores, nDescriptors0,
-      nDescriptors1, ratio_thresh_sq, 0.0f);
-
-  // cudaDeviceSynchronize();
-  // we calculate the matches for the second image
-  int blocksPerGrid2 = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
-
-  findNearestNeighbors<<<blocksPerGrid2, threadsPerBlock>>>(
-      d_descriptors1, d_descriptors0, d_matches1, d_scores1, nDescriptors1,
-      nDescriptors0, ratio_thresh_sq, 0.0f);
-
-  cudaDeviceSynchronize();
-
-  // we check if the matches are mutual
-  mutualCheck<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
-                                                  d_matches, nDescriptors0);
-
-  cudaDeviceSynchronize();
-
-  cudaMemcpy(matches.data(), d_matches, nDescriptors0 * sizeof(int),
-             cudaMemcpyDeviceToHost);
-  cudaMemcpy(scores.data(), d_scores, nDescriptors0 * sizeof(float),
-             cudaMemcpyDeviceToHost);
-
-  cudaFree(d_descriptors0);
-  cudaFree(d_descriptors1);
-  cudaFree(d_matches0);
-
-  cudaFree(d_matches1);
-  cudaFree(d_matches);
-  cudaFree(d_scores);
+  if (idx < nDescriptors) {
+    int match1 = matches0[idx];
+    matches0[idx] = (match1 != -1 && matches1[match1] == idx) ? match1 : -1;
+  }
 }
 
 void allocateDescriptors(float** d_descriptors,
@@ -336,68 +203,65 @@ void featureMatchingV2(const float* d_descriptors0, const float* d_descriptors1,
                        std::vector<int>& matches, std::vector<float>& scores,
                        float ratio_thresh_sq, int nDescriptors0,
                        int nDescriptors1) {
-  int *d_matches0, *d_matches1, *d_matches;
-  float *d_scores, *d_scores1;
   float* d_sim;
   float* d_simT;
 
-  cudaMalloc(&d_matches0, nDescriptors0 * sizeof(int));
-  cudaMalloc(&d_matches1, nDescriptors1 * sizeof(int));
-  cudaMalloc(&d_matches, nDescriptors0 * sizeof(int));
-  cudaMalloc(&d_scores, nDescriptors0 * sizeof(float));
-  cudaMalloc(&d_scores1, nDescriptors1 * sizeof(float));
-  // malloc for similarity matrix
-  cudaMalloc(&d_sim, nDescriptors0 * nDescriptors1 * sizeof(float));
-  cudaMalloc(&d_simT, nDescriptors0 * nDescriptors1 * sizeof(float));
+  cudaMallocAsync(&d_sim, nDescriptors0 * nDescriptors1 * sizeof(float), 0);
+  cudaMallocAsync(&d_simT, nDescriptors0 * nDescriptors1 * sizeof(float), 0);
 
-  int threadsPerBlock = BLOCK_SIZE;
+  int *d_matches0, *d_matches1;
+  float *d_scores0, *d_scores1;
+
+  int threadsPerBlock = 32;
+  dim3 threadsPerBlock2D(4, 4);
+
   int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
-  // we calculate the matches for the first image
-
-  // similarity matrix will be nDescriptors0 x nDescriptors1
-  dim3 threadsPerBlock2D(BLOCK_SIZE, BLOCK_SIZE);
+  int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
   dim3 blocksPerGrid2D(
       (nDescriptors0 + threadsPerBlock2D.x - 1) / threadsPerBlock2D.x,
       (nDescriptors1 + threadsPerBlock2D.y - 1) / threadsPerBlock2D.y);
+
+  cudaDeviceSynchronize();
+
+  cudaMallocAsync(&d_matches0, nDescriptors0 * sizeof(int), 0);
+  cudaMallocAsync(&d_matches1, nDescriptors1 * sizeof(int), 0);
+  cudaMallocAsync(&d_scores0, nDescriptors0 * sizeof(float), 0);
+  cudaMallocAsync(&d_scores1, nDescriptors1 * sizeof(float), 0);
+
   similarityMatrixAndTransposeV2<<<blocksPerGrid2D, threadsPerBlock2D>>>(
       d_descriptors0, d_descriptors1, nDescriptors0, nDescriptors1, 128, d_sim,
       d_simT);
 
   cudaDeviceSynchronize();
 
-  // matches
-  find_nn<<<blocksPerGrid, threadsPerBlock>>>(d_sim, d_matches0, d_scores,
-                                              nDescriptors0, nDescriptors1,
-                                              ratio_thresh_sq);
+  find_nnV2<<<blocksPerGrid, threadsPerBlock>>>(d_sim, d_matches0, d_scores0,
+                                                nDescriptors0, nDescriptors1,
+                                                ratio_thresh_sq);
 
-  // transpose
-  // otherside matches
-  int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
-
-  find_nn<<<blocksPerGridT, threadsPerBlock>>>(d_simT, d_matches1, d_scores1,
-                                               nDescriptors1, nDescriptors0,
-                                               ratio_thresh_sq);
+  find_nnV2<<<blocksPerGridT, threadsPerBlock>>>(d_simT, d_matches1, d_scores1,
+                                                 nDescriptors1, nDescriptors0,
+                                                 ratio_thresh_sq);
 
   cudaDeviceSynchronize();
 
-  // we check if the matches are mutual
-  mutualCheck<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
-                                                  d_matches, nDescriptors0);
+  cudaMemcpyAsync(scores.data(), d_scores0, nDescriptors0 * sizeof(float),
+                  cudaMemcpyDeviceToHost);
+
+  cudaFreeAsync(d_sim, 0);
+  cudaFreeAsync(d_simT, 0);
+  cudaFreeAsync(d_scores1, 0);
+
+  mutualCheckV3<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
+                                                    nDescriptors0);
 
   cudaDeviceSynchronize();
 
-  cudaMemcpy(matches.data(), d_matches, nDescriptors0 * sizeof(int),
-             cudaMemcpyDeviceToHost);
-  cudaMemcpy(scores.data(), d_scores, nDescriptors0 * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  cudaMemcpyAsync(matches.data(), d_matches0, nDescriptors0 * sizeof(int),
+                  cudaMemcpyDeviceToHost);
 
-  cudaFree(d_matches0);
+  cudaFreeAsync(d_matches0, 0);
+  cudaFreeAsync(d_matches1, 0);
+  cudaFreeAsync(d_scores0, 0);
 
-  cudaFree(d_sim);
-  cudaFree(d_simT);
-
-  cudaFree(d_matches1);
-  cudaFree(d_matches);
-  cudaFree(d_scores);
-  cudaFree(d_scores1);
+  cudaDeviceSynchronize();
 }
