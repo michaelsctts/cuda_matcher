@@ -1,14 +1,22 @@
 #include <cublas_v2.h>
 
-#include <cfloat>
-#include <cmath>
 #include <iostream>
 #include <vector>
-#define BLOCK_SIZE 16
+
+#ifdef PYBIND
+#include <pybind11/numpy.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#endif
+
+// TODO: try using half precision for performance
+// #include <cuda_fp16.h>
+
 #define TILE_WIDTH 16
 
 #define FLOAT_LOWEST -340282346638528859811704183484516925440.0
 
+// SimilarityMatrixAndTransposeV2 is faster but this is kept for reference
 __global__ void similarityMatrixAndTranspose(
     const float* descriptors0, const float* descriptors1, int nDescriptors0,
     const int nDescriptors1, const int descriptorDim, float* sim, float* simT) {
@@ -27,6 +35,8 @@ __global__ void similarityMatrixAndTranspose(
   }
 }
 
+// TODO: check if pre-setting to 0.0 is faster than checking for overflow in
+// shared memory
 __global__ void matrixMultiplyShared(const float* A, const float* B, float* C,
                                      float* CT, int numARows, int numAColumns,
                                      int numBRows, int numBColumns,
@@ -66,6 +76,7 @@ __global__ void matrixMultiplyShared(const float* A, const float* B, float* C,
   }
 }
 
+// TODO: fix this, cublas should be faster than tiled mat mul
 void simCublas(const float* descriptors0, const float* descriptors1,
                int nDescriptors0, int nDescriptors1, int descriptorDim,
                float* sim) {
@@ -87,6 +98,7 @@ void simCublas(const float* descriptors0, const float* descriptors1,
   cublasDestroy(handle);
 }
 
+// tiled matmul is faster, tiling this might be faster
 __global__ void similarityMatrixAndTransposeV2(
     const float* descriptors0, const float* descriptors1, int nDescriptors0,
     int nDescriptors1, int descriptorDim, float* sim, float* simT) {
@@ -151,6 +163,7 @@ __global__ void transposeSim(const float* sim, float* simT, int nDescriptors0,
   }
 }
 
+// needed for kernel matrixMultiplyShared
 __global__ void transposeDescriptors(const float* descriptors,
                                      float* descriptorsT, int nDescriptors,
                                      int descriptorDim) {
@@ -172,7 +185,6 @@ __global__ void find_nn(const float* sim, int* matches, float* scores,
     float sim_nn0 = -1e30f;
     float sim_nn1 = -1e30f;
     int nearestNeighborIdx = -1;
-#pragma unroll 2
     for (int i = 0; i < nDescriptors1; ++i) {
       if (sim[idx * nDescriptors1 + i] > sim_nn0) {
         sim_nn1 = sim_nn0;
@@ -224,57 +236,7 @@ __global__ void find_nnV2(const float* sim, int* matches, float* scores,
   }
 }
 
-__global__ void findNearestNeighbors(const float* descriptors0,
-                                     const float* descriptors1, int* matches,
-                                     float* scores, int nDescriptors0,
-                                     int nDescriptors1,
-                                     const float ratio_thresh_sq,
-                                     float distance_thresh_sq) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-
-  if (idx < nDescriptors0) {
-    float sim0 = -100000.0f;
-    int nearestNeighborIdx = -1;
-
-    for (int i = 0; i < nDescriptors1; ++i) {
-      float distance = 0.0f;
-      for (int j = 0; j < 128; ++j) {
-        float diff = descriptors0[idx * 128 + j] * descriptors1[i * 128 + j];
-        distance += diff * diff;
-      }
-      if (distance > sim0) {
-        sim0 = distance;
-        nearestNeighborIdx = i;
-      }
-    }
-
-    float sim1 = -100000.0f;
-    int nearestNeighborIdx1 = -1;
-
-    for (int i = 0; i < nDescriptors1; ++i) {
-      float distance = 0.0f;
-      for (int j = 0; j < 128; ++j) {
-        if (i == nearestNeighborIdx) {
-          continue;
-        }
-        float diff = descriptors0[idx * 128 + j] * descriptors1[i * 128 + j];
-        distance += diff;
-      }
-      if (distance > sim1) {
-        sim1 = distance;
-        nearestNeighborIdx1 = i;
-      }
-    }
-
-    // float dist_nn0 = (2 * (1 - sim0));
-    // float dist_nn1 = 2 * (1 - sim1);
-
-    bool validMatch = ((2 * (1 - sim0)) <= ratio_thresh_sq * (2 * (1 - sim1)));
-
-    matches[idx] = (validMatch) ? nearestNeighborIdx : -1;
-    scores[idx] = (validMatch) ? (sim0 + 1) / 2.0f : 0.0f;
-  }
-}
+// mutual check v3 is better but v1 is kept for reference
 __global__ void mutualCheck(const int* matches0, const int* matches1,
                             int* matches, int nDescriptors) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -463,3 +425,53 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
 
   cudaDeviceSynchronize();
 }
+
+#ifdef PYBIND
+
+namespace py = pybind11;
+
+void featureMatchingWrapper(py::array_t<float> descriptors0,
+                            py::array_t<float> descriptors1,
+                            float ratio_thresh_sq, std::vector<int>& matches,
+                            std::vector<float>& scores) {
+  py::buffer_info buf0 = descriptors0.request();
+  py::buffer_info buf1 = descriptors1.request();
+
+  if (buf0.ndim != 2 || buf1.ndim != 2) {
+    throw std::runtime_error("Number of dimensions must be two");
+  }
+
+  if (buf0.shape[1] != 128 || buf1.shape[1] != 128) {
+    throw std::runtime_error("Number of columns must be 128");
+  }
+
+  int nDescriptors0 = buf0.shape[0];
+  int nDescriptors1 = buf1.shape[0];
+
+  float* d_descriptors0;
+  float* d_descriptors1;
+
+  cudaMalloc(&d_descriptors0, nDescriptors0 * 128 * sizeof(float));
+  cudaMalloc(&d_descriptors1, nDescriptors1 * 128 * sizeof(float));
+
+  cudaMemcpy(d_descriptors0, buf0.ptr, nDescriptors0 * 128 * sizeof(float),
+             cudaMemcpyHostToDevice);
+  cudaMemcpy(d_descriptors1, buf1.ptr, nDescriptors1 * 128 * sizeof(float),
+             cudaMemcpyHostToDevice);
+
+  featureMatching(d_descriptors0, d_descriptors1, matches, scores,
+                  ratio_thresh_sq, nDescriptors0, nDescriptors1);
+
+  cudaFree(d_descriptors0);
+  cudaFree(d_descriptors1);
+}
+
+// pybind
+PYBIND11_MODULE(feature_matching, m) {
+  m.doc() = "Feature matching module";
+
+  m.def("featureMatching", &featureMatchingWrapper,
+        "A function which performs feature matching");
+}
+
+#endif

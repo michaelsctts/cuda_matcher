@@ -56,7 +56,6 @@ int main(int argc, const char **argv) {
     exit(0);
   }
 
-  // TODO: argparsing
   std::string features_path = GET_ARG(features_path);
   std::string pairs_path = GET_ARG(pairs_path);
   std::string output_path = GET_ARG(output_path);
@@ -64,11 +63,13 @@ int main(int argc, const char **argv) {
 
   std::vector<Image *> images;
   std::unordered_map<std::string, Image *> images_map;
-  read_features(features_path, images, images_map);
   std::vector<Pair *> pairs;
+  std::vector<std::vector<Pair *>> pairs_parts(num_threads);
+  std::vector<std::thread> threads;
+
+  read_features(features_path, images, images_map);
   read_pairs(pairs_path, pairs, images_map);
 
-  std::vector<std::vector<Pair *>> pairs_parts(num_threads);
   for (int i = 0; i < pairs.size(); i++) {
     pairs_parts[i % num_threads].push_back(pairs[i]);
   }
@@ -77,34 +78,22 @@ int main(int argc, const char **argv) {
 
   auto start = std::chrono::high_resolution_clock::now();
 
-  std::vector<std::thread> threads;
   float ratio = std::pow(0.95, 2);
+
   for (int i = 0; i < num_threads; i++) {
     threads.push_back(std::thread(run, i, pairs_parts[i]));
   }
   for (int i = 0; i < num_threads; i++) {
     threads[i].join();
   }
-  // for (int i = 0; i < pairs.size(); i++) {
-  //   threads.push_back(std::thread(runSingle, i, pairs[i], ratio));
-  // }
-
-  // for (int i = 0; i < pairs.size(); i++) {
-  //   threads[i].join();
-  // }
-  // for (int i = 0; i < pairs.size(); i++) {
-  //   featureMatching(pairs[i]->image0->d_descriptors,
-  //                   pairs[i]->image1->d_descriptors, pairs[i]->matches,
-  //                   pairs[i]->scores, ratio,
-  //                   pairs[i]->image0->getNumFeatures(),
-  //                   pairs[i]->image1->getNumFeatures());
-  // }
 
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> elapsed = end - start;
 
   // TODO: save matches and scores
   save_matches(output_path, pairs);
+
+  count_matches(pairs);
 
   std::cout << "Elapsed time: " << elapsed.count() << " ms\n";
   std::cout << "Mean per pair: " << elapsed.count() / pairs.size() << " ms\n";

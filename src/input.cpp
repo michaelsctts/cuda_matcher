@@ -110,26 +110,26 @@ void read_pairs(std::string filename, std::vector<Pair *> &pairs,
 }
 
 void save_matches(std::string filename, std::vector<Pair *> &pairs) {
-  // std::ofstream file(filename);
+  std::ofstream file(filename);
 
-  // lets start with cout
-  int count = 0;
-  int num_matches = 0;
   for (int i = 0; i < pairs.size(); i++) {
-    Pair *pair = pairs[i];
-    Image *image0 = pair->image0;
-    Image *image1 = pair->image1;
-    // std::cout << image0->name << " " << image1->name << std::endl;
-    for (int j = 0; j < image0->getNumFeatures(); j++) {
-      count++;
-      // pair->matches[j] means kp j in image0 has match matches[j] in image1
-      if (pair->matches[j] != -1) {
-        // std::cout << j << " " << pair->matches[j] << std::endl;
-        num_matches++;
+    file << *pairs[0] << std::endl;
+  }
+  file.close();
+}
+
+void count_matches(std::vector<Pair *> &pairs) {
+  int total_keypoints = 0;
+  int total_matches = 0;
+  for (int i = 0; i < pairs.size(); i++) {
+    total_keypoints += pairs[i]->image0->getNumFeatures();
+    for (int j = 0; j < pairs[i]->image0->getNumFeatures(); j++) {
+      if (pairs[i]->matches[j] != -1) {
+        total_matches++;
       }
     }
   }
   std::cout << "sexo" << std::endl;
-  std::cout << "num keypoints matcheados: " << num_matches << std::endl;
-  std::cout << "num keypoints totales: " << count << std::endl;
+  std::cout << "Total matches: " << total_matches << std::endl;
+  std::cout << "Total keypoints: " << total_keypoints << std::endl;
 }

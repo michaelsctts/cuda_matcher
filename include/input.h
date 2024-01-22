@@ -20,4 +20,6 @@ void read_pairs(std::string filename, std::vector<Pair *> &pairs,
 
 void save_matches(std::string filename, std::vector<Pair *> &pairs);
 
+void count_matches(std::vector<Pair *> &pairs);
+
 #endif  // INPUT_H

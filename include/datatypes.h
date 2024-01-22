@@ -75,6 +75,19 @@ struct Pair {
   std::vector<float> scores1;
   std::vector<int> matches;
   std::vector<float> scores;
+
+  friend std::ostream& operator<<(std::ostream& os, const Pair& pair) {
+    os << pair.image0->name << " " << pair.image1->name << std::endl;
+    for (int i = 0; i < pair.matches.size(); i++) {
+      os << pair.matches[i] << " ";
+    }
+    os << std::endl;
+    for (int i = 0; i < pair.scores.size(); i++) {
+      os << pair.scores[i] << " ";
+    }
+    os << std::endl;
+    return os;
+  }
 };
 
 #endif  // IMAGE_H
