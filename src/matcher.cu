@@ -9,8 +9,12 @@
 #include <pybind11/stl.h>
 #endif
 
+#ifdef FP16
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#endif
+
 // TODO: try using half precision for performance
-// #include <cuda_fp16.h>
 
 #define TILE_WIDTH 16
 
@@ -160,6 +164,16 @@ __global__ void transposeSim(const float* sim, float* simT, int nDescriptors0,
 
   if (idx < nDescriptors0 && idy < nDescriptors1) {
     simT[idy * nDescriptors0 + idx] = sim[idx * nDescriptors1 + idy];
+  }
+}
+
+template <typename T>
+__global__ void transpose(const T* in, T* out, int n, int m) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  int idy = threadIdx.y + blockIdx.y * blockDim.y;
+
+  if (idx < n && idy < m) {
+    out[idy * n + idx] = in[idx * m + idy];
   }
 }
 
@@ -374,7 +388,7 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
       (nDescriptors1 + threadsPerBlock2Ddt.x - 1) / threadsPerBlock2Ddt.x,
       (128 + threadsPerBlock2Ddt.y - 1) / threadsPerBlock2Ddt.y);
 
-  transposeDescriptors<<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
+  transpose<float><<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
       d_descriptors1, d_descriptors1T, nDescriptors1, 128);
 
   cudaDeviceSynchronize();
@@ -425,6 +439,209 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
 
   cudaDeviceSynchronize();
 }
+
+#ifdef FP16
+__global__ void matrixMultiplyShared(const half* A, const half* B, half* C,
+                                     half* CT, int numARows, int numAColumns,
+                                     int numBRows, int numBColumns,
+                                     int numCRows, int numCColumns) {
+  __shared__ half sA[TILE_WIDTH][TILE_WIDTH];
+  __shared__ half sB[TILE_WIDTH][TILE_WIDTH];
+
+  int Row = blockDim.y * blockIdx.y + threadIdx.y;
+  int Col = blockDim.x * blockIdx.x + threadIdx.x;
+  half Cvalue = 0.0;
+  sA[threadIdx.y][threadIdx.x] = 0.0;
+  sB[threadIdx.y][threadIdx.x] = 0.0;
+
+  for (int ph = 0; ph < (((numAColumns - 1) / TILE_WIDTH) + 1); ph++) {
+    if ((Row < numARows) && (threadIdx.x + (ph * TILE_WIDTH)) < numAColumns) {
+      sA[threadIdx.y][threadIdx.x] =
+          A[(Row * numAColumns) + threadIdx.x + (ph * TILE_WIDTH)];
+    } else {
+      sA[threadIdx.y][threadIdx.x] = 0.0;
+    }
+    if (Col < numBColumns && (threadIdx.y + ph * TILE_WIDTH) < numBRows) {
+      sB[threadIdx.y][threadIdx.x] =
+          B[(threadIdx.y + ph * TILE_WIDTH) * numBColumns + Col];
+    } else {
+      sB[threadIdx.y][threadIdx.x] = 0.0;
+    }
+    __syncthreads();
+
+    for (int j = 0; j < TILE_WIDTH; ++j) {
+      // sm53 and above
+      // lower sm must convert to float and back
+      Cvalue += __hmul(sA[threadIdx.y][j], sB[j][threadIdx.x]);
+    }
+    __syncthreads();
+  }
+  if (Row < numCRows && Col < numCColumns) {
+    C[Row * numCColumns + Col] = Cvalue;
+    CT[Col * numCRows + Row] = Cvalue;
+  }
+}
+
+__global__ void find_nnV2(const half* sim, int* matches, half* scores,
+                          const int nDescriptors0, const int nDescriptors1,
+                          const half ratio_thresh_sq) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+  if (idx < nDescriptors0) {
+    half sim_nn0 = __float2half(-1e15f);
+    half sim_nn1 = __float2half(-1e15f);
+    int nearestNeighborIdx = -1;
+
+    for (int i = 0; i < nDescriptors1; ++i) {
+      half current_sim = sim[idx * nDescriptors1 + i];
+
+      if (__hgt(current_sim, sim_nn0)) {
+        sim_nn1 = sim_nn0;
+        sim_nn0 = current_sim;
+        nearestNeighborIdx = i;
+      } else if (__hgt(current_sim, sim_nn1)) {
+        sim_nn1 = current_sim;
+      }
+    }
+
+    half dist_nn0 =
+        __hmul(__float2half(2.0f), __hsub(__float2half(1.0f), sim_nn0));
+    half dist_nn1 =
+        __hmul(__float2half(2.0f), __hsub(__float2half(1.0f), sim_nn1));
+
+    bool validMatch = __hle(dist_nn0, __hmul(ratio_thresh_sq, dist_nn1));
+
+    matches[idx] = (validMatch) ? nearestNeighborIdx : -1;
+    scores[idx] = (validMatch) ? __hdiv(__hadd(sim_nn0, __float2half(1.0f)),
+                                        __float2half(2.0f))
+                               : __float2half(0.0f);
+  }
+}
+
+__global__ void float2half(const float* in, half* out, int n) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+  if (idx < n) {
+    out[idx] = __float2half(in[idx]);
+  }
+}
+
+__global__ void half2float(const half* in, float* out, int n) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+  if (idx < n) {
+    out[idx] = __half2float(in[idx]);
+  }
+}
+
+void featureMatchingHalf(const half* d_descriptors0, const half* d_descriptors1,
+                         std::vector<int>& matches, std::vector<float>& scores,
+                         float ratio_thresh_sq, int nDescriptors0,
+                         int nDescriptors1) {
+  half* d_sim;
+  half* d_simT;
+
+  cudaMallocAsync(&d_sim, nDescriptors0 * nDescriptors1 * sizeof(half), 0);
+  cudaMallocAsync(&d_simT, nDescriptors0 * nDescriptors1 * sizeof(half), 0);
+
+  int *d_matches0, *d_matches1;
+  half *d_scores0, *d_scores1;
+
+  cudaMallocAsync(&d_matches0, nDescriptors0 * sizeof(int), 0);
+  cudaMallocAsync(&d_matches1, nDescriptors1 * sizeof(int), 0);
+  cudaMallocAsync(&d_scores0, nDescriptors0 * sizeof(half), 0);
+  cudaMallocAsync(&d_scores1, nDescriptors1 * sizeof(half), 0);
+
+  half* d_descriptors1T;
+  cudaMalloc(&d_descriptors1T, nDescriptors1 * 128 * sizeof(half));
+
+  dim3 threadsPerBlock2Ddt(8, 8);
+  dim3 blocksPerGrid2Ddt(
+      (nDescriptors1 + threadsPerBlock2Ddt.x - 1) / threadsPerBlock2Ddt.x,
+      (128 + threadsPerBlock2Ddt.y - 1) / threadsPerBlock2Ddt.y);
+
+  cudaDeviceSynchronize();
+
+  transpose<half><<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
+      d_descriptors1, d_descriptors1T, nDescriptors1, 128);
+
+  dim3 threadsPerBlock2Dmult(TILE_WIDTH, TILE_WIDTH);
+  dim3 blocksPerGrid2Dmult((nDescriptors1 / TILE_WIDTH + 1),
+                           (nDescriptors0 / TILE_WIDTH + 1));
+
+  matrixMultiplyShared<<<blocksPerGrid2Dmult, threadsPerBlock2Dmult>>>(
+      d_descriptors0, d_descriptors1T, d_sim, d_simT, nDescriptors0, 128, 128,
+      nDescriptors1, nDescriptors0, nDescriptors1);
+
+  int threadsPerBlock = TILE_WIDTH;
+  int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
+  int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
+
+  cudaDeviceSynchronize();
+
+  find_nnV2<<<blocksPerGrid, threadsPerBlock>>>(d_sim, d_matches0, d_scores0,
+                                                nDescriptors0, nDescriptors1,
+                                                ratio_thresh_sq);
+
+  find_nnV2<<<blocksPerGridT, threadsPerBlock>>>(d_simT, d_matches1, d_scores1,
+                                                 nDescriptors1, nDescriptors0,
+                                                 ratio_thresh_sq);
+
+  cudaDeviceSynchronize();
+
+  // copy scores to float
+  float* scoresFloat;
+  cudaMalloc(&scoresFloat, nDescriptors0 * sizeof(float));
+  half2float<<<blocksPerGrid, threadsPerBlock>>>(d_scores0, scoresFloat,
+                                                 nDescriptors0);
+
+  cudaMemcpyAsync(scores.data(), scoresFloat, nDescriptors0 * sizeof(float),
+                  cudaMemcpyDeviceToHost);
+
+  cudaFreeAsync(d_descriptors1T, 0);
+  cudaFreeAsync(d_sim, 0);
+  cudaFreeAsync(d_simT, 0);
+  cudaFreeAsync(d_scores1, 0);
+  cudaFreeAsync(scoresFloat, 0);
+
+  mutualCheckV3<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
+                                                    nDescriptors0);
+
+  cudaDeviceSynchronize();
+
+  cudaMemcpyAsync(matches.data(), d_matches0, nDescriptors0 * sizeof(int),
+                  cudaMemcpyDeviceToHost);
+
+  cudaFreeAsync(d_matches0, 0);
+  cudaFreeAsync(d_matches1, 0);
+  cudaFreeAsync(d_scores0, 0);
+
+  cudaDeviceSynchronize();
+}
+
+// wrapper for half precision from float
+void featureMatchingHalf(float* d_descriptors0, float* d_descriptors1,
+                         std::vector<int>& matches, std::vector<float>& scores,
+                         float ratio_thresh_sq, int nDescriptors0,
+                         int nDescriptors1) {
+  half *d_descriptors0_half, *d_descriptors1_half;
+
+  cudaMalloc(&d_descriptors0_half, nDescriptors0 * 128 * sizeof(half));
+  cudaMalloc(&d_descriptors1_half, nDescriptors1 * 128 * sizeof(half));
+
+  float2half<<<(nDescriptors0 * 128 + 127) / 128, 128>>>(
+      d_descriptors0, d_descriptors0_half, nDescriptors0 * 128);
+  float2half<<<(nDescriptors1 * 128 + 127) / 128, 128>>>(
+      d_descriptors1, d_descriptors1_half, nDescriptors1 * 128);
+
+  featureMatchingHalf(d_descriptors0_half, d_descriptors1_half, matches, scores,
+                      ratio_thresh_sq, nDescriptors0, nDescriptors1);
+
+  cudaFree(d_descriptors0_half);
+  cudaFree(d_descriptors1_half);
+}
+
+#endif
 
 #ifdef PYBIND
 

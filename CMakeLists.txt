@@ -10,9 +10,22 @@ FIND_PACKAGE(CUDA REQUIRED)
 
 set(CMAKE_BUILD_TYPE Release)
 
+
+if(FP16)
+    message(STATUS "Building with fp16 support")
+    add_definitions(-DFP16)
+else()
+    message(STATUS "Building only fp32")
+endif()
+
+
+
+
+
+
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -Ofast -pthread -march=native")
 
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_52 -gencode=arch=compute_86,code=sm_86 -O3 -march=native -pthread --use_fast_math")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_53 -gencode=arch=compute_86,code=sm_86 -O3 -march=native -pthread --use_fast_math")
 
 include(FetchContent)
 FetchContent_Declare(
