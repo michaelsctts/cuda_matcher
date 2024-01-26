@@ -1,5 +1,6 @@
 #include <cublas_v2.h>
 
+#include <chrono>
 #include <iostream>
 #include <vector>
 
@@ -51,8 +52,8 @@ __global__ void matrixMultiplyShared(const float* A, const float* B, float* C,
   int Row = blockDim.y * blockIdx.y + threadIdx.y;
   int Col = blockDim.x * blockIdx.x + threadIdx.x;
   float Cvalue = 0.0;
-  sA[threadIdx.y][threadIdx.x] = 0.0;
-  sB[threadIdx.y][threadIdx.x] = 0.0;
+  // sA[threadIdx.y][threadIdx.x] = 0.0;
+  // sB[threadIdx.y][threadIdx.x] = 0.0;
 
   for (int ph = 0; ph < (((numAColumns - 1) / TILE_WIDTH) + 1); ph++) {
     if ((Row < numARows) && (threadIdx.x + (ph * TILE_WIDTH)) < numAColumns) {
@@ -78,28 +79,6 @@ __global__ void matrixMultiplyShared(const float* A, const float* B, float* C,
     C[Row * numCColumns + Col] = Cvalue;
     CT[Col * numCRows + Row] = Cvalue;
   }
-}
-
-// TODO: fix this, cublas should be faster than tiled mat mul
-void simCublas(const float* descriptors0, const float* descriptors1,
-               int nDescriptors0, int nDescriptors1, int descriptorDim,
-               float* sim) {
-  cublasHandle_t handle;
-  cublasCreate(&handle);
-
-  float alpha = 1.0f;
-  float beta = 0.0f;
-
-  cublasStatus_t status =
-      cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T, nDescriptors1,
-                  nDescriptors0, 128, &alpha, descriptors1, nDescriptors1,
-                  descriptors0, nDescriptors0, &beta, sim, nDescriptors1);
-
-  if (status != CUBLAS_STATUS_SUCCESS) {
-    std::cout << "cublasSgemm failed" << std::endl;
-  }
-
-  cublasDestroy(handle);
 }
 
 // tiled matmul is faster, tiling this might be faster
@@ -130,43 +109,6 @@ __global__ void similarityMatrixAndTransposeV2(
   }
 }
 
-__global__ void similarityMatrixFast(const float* descriptors0,
-                                     const float* descriptors1,
-                                     int nDescriptors0, int nDescriptors1,
-                                     int descriptorDim, float* sim) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  int idy = threadIdx.y + blockIdx.y * blockDim.y;
-
-  if (idx < nDescriptors0 && idy < nDescriptors1) {
-    int globalIdx = idx * descriptorDim;
-    int globalIdy = idy * descriptorDim;
-
-    float dotProduct = 0.0f;
-#pragma unroll 4
-    for (int i = 0; i < descriptorDim; i += 4) {
-      float4 vec0 = *((float4*)(descriptors0 + globalIdx + i));
-      float4 vec1 = *((float4*)(descriptors1 + globalIdy + i));
-
-      dotProduct += __fmaf_rn(vec0.x, vec1.x, 0.0f);
-      dotProduct += __fmaf_rn(vec0.y, vec1.y, 0.0f);
-      dotProduct += __fmaf_rn(vec0.z, vec1.z, 0.0f);
-      dotProduct += __fmaf_rn(vec0.w, vec1.w, 0.0f);
-    }
-
-    sim[idx * nDescriptors1 + idy] = dotProduct;
-  }
-}
-
-__global__ void transposeSim(const float* sim, float* simT, int nDescriptors0,
-                             int nDescriptors1) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  int idy = threadIdx.y + blockIdx.y * blockDim.y;
-
-  if (idx < nDescriptors0 && idy < nDescriptors1) {
-    simT[idy * nDescriptors0 + idx] = sim[idx * nDescriptors1 + idy];
-  }
-}
-
 template <typename T>
 __global__ void transpose(const T* in, T* out, int n, int m) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -174,19 +116,6 @@ __global__ void transpose(const T* in, T* out, int n, int m) {
 
   if (idx < n && idy < m) {
     out[idy * n + idx] = in[idx * m + idy];
-  }
-}
-
-// needed for kernel matrixMultiplyShared
-__global__ void transposeDescriptors(const float* descriptors,
-                                     float* descriptorsT, int nDescriptors,
-                                     int descriptorDim) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  int idy = threadIdx.y + blockIdx.y * blockDim.y;
-
-  if (idx < nDescriptors && idy < descriptorDim) {
-    descriptorsT[idy * nDescriptors + idx] =
-        descriptors[idx * descriptorDim + idy];
   }
 }
 
@@ -250,20 +179,8 @@ __global__ void find_nnV2(const float* sim, int* matches, float* scores,
   }
 }
 
-// mutual check v3 is better but v1 is kept for reference
-__global__ void mutualCheck(const int* matches0, const int* matches1,
-                            int* matches, int nDescriptors) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-
-  if (idx < nDescriptors) {
-    int match1 = matches0[idx];
-    int match2 = (match1 != -1) ? matches1[match1] : -1;
-    matches[idx] = (match2 == idx) ? match1 : -1;
-  }
-}
-
-__global__ void mutualCheckV2(int* matches0, const int* matches1,
-                              int nDescriptors) {
+__global__ void mutualCheck(int* matches0, const int* matches1,
+                            int nDescriptors) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
   if (idx < nDescriptors) {
@@ -273,8 +190,8 @@ __global__ void mutualCheckV2(int* matches0, const int* matches1,
   }
 }
 
-__global__ void mutualCheckV3(int* matches0, const int* matches1,
-                              int nDescriptors) {
+__global__ void mutualCheckFast(int* matches0, const int* matches1,
+                                int nDescriptors) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
   if (idx < nDescriptors) {
@@ -343,8 +260,8 @@ void featureMatchingLegacy(const float* d_descriptors0,
   cudaFreeAsync(d_simT, 0);
   cudaFreeAsync(d_scores1, 0);
 
-  mutualCheckV3<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
-                                                    nDescriptors0);
+  mutualCheckFast<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
+                                                      nDescriptors0);
 
   cudaDeviceSynchronize();
 
@@ -381,31 +298,31 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
   float* d_descriptors1T;
   cudaMalloc(&d_descriptors1T, nDescriptors1 * 128 * sizeof(float));
 
-  cudaDeviceSynchronize();
-
   dim3 threadsPerBlock2Ddt(8, 8);
   dim3 blocksPerGrid2Ddt(
       (nDescriptors1 + threadsPerBlock2Ddt.x - 1) / threadsPerBlock2Ddt.x,
       (128 + threadsPerBlock2Ddt.y - 1) / threadsPerBlock2Ddt.y);
 
+  cudaDeviceSynchronize();
+
   transpose<float><<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
       d_descriptors1, d_descriptors1T, nDescriptors1, 128);
 
-  cudaDeviceSynchronize();
-
   dim3 threadsPerBlock2Dmult(TILE_WIDTH, TILE_WIDTH);
-  dim3 blocksPerGrid2Dmult((nDescriptors1 / TILE_WIDTH + 1),
-                           (nDescriptors0 / TILE_WIDTH + 1));
+  dim3 blocksPerGrid2Dmult((nDescriptors1 + TILE_WIDTH - 1) / TILE_WIDTH,
+                           (nDescriptors0 + TILE_WIDTH - 1) / TILE_WIDTH);
+
+  cudaDeviceSynchronize();
 
   matrixMultiplyShared<<<blocksPerGrid2Dmult, threadsPerBlock2Dmult>>>(
       d_descriptors0, d_descriptors1T, d_sim, d_simT, nDescriptors0, 128, 128,
       nDescriptors1, nDescriptors0, nDescriptors1);
 
-  cudaDeviceSynchronize();
-
   int threadsPerBlock = TILE_WIDTH;
   int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
   int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
+
+  cudaDeviceSynchronize();
 
   find_nnV2<<<blocksPerGrid, threadsPerBlock>>>(d_sim, d_matches0, d_scores0,
                                                 nDescriptors0, nDescriptors1,
@@ -425,8 +342,8 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
   cudaFreeAsync(d_simT, 0);
   cudaFreeAsync(d_scores1, 0);
 
-  mutualCheckV3<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
-                                                    nDescriptors0);
+  mutualCheckFast<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
+                                                      nDescriptors0);
 
   cudaDeviceSynchronize();
 
@@ -437,7 +354,7 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
   cudaFreeAsync(d_matches1, 0);
   cudaFreeAsync(d_scores0, 0);
 
-  cudaDeviceSynchronize();
+  // cudaDeviceSynchronize();
 }
 
 #ifdef FP16
