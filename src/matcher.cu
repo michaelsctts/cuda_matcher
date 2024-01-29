@@ -10,10 +10,15 @@
 #include <pybind11/stl.h>
 #endif
 
+#include <cuda_runtime.h>
+
 #ifdef FP16
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #endif
+
+//includ for __fgt, __fge, __flt, __fle, __feq
+
 
 // TODO: try using half precision for performance
 
@@ -28,6 +33,30 @@ __device__ __forceinline__ float multiply(float a, float b) {
 __device__ __forceinline__ float sum(float a, float b) {
   return __fadd_rn(a, b);
 }
+
+__device__ __forceinline__ bool greater(float a, float b) {
+  return a > b;
+} 
+
+__device__ __forceinline__ bool greaterEqual(float a, float b) {
+  return a >= b;
+}
+
+__device__ __forceinline__ bool less(float a, float b) {
+  return a < b;
+}
+
+__device__ __forceinline__ bool lessEqual(float a, float b) {
+  return a <= b;
+}
+
+__device__ __forceinline__ bool equal(float a, float b) {
+  return a == b;
+}
+
+
+
+
 
 #ifdef FP16
 __device__ __forceinline__ half multiply(half a, half b) {
@@ -208,7 +237,7 @@ __global__ void find_nn(const float* sim, int* matches, float* scores,
   }
 }
 
-__global__ void find_nnV2(const float* sim, int* matches, float* scores,
+__global__ void find_nnV2legacy(const float* sim, int* matches, float* scores,
                           const int nDescriptors0, const int nDescriptors1,
                           const float ratio_thresh_sq) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -217,6 +246,7 @@ __global__ void find_nnV2(const float* sim, int* matches, float* scores,
     float sim_nn0 = -1e30f;
     float sim_nn1 = -1e30f;
     int nearestNeighborIdx = -1;
+    #pragma unroll 4
     for (int i = 0; i < nDescriptors1; ++i) {
       float current_sim = sim[idx * nDescriptors1 + i];
 
@@ -235,7 +265,89 @@ __global__ void find_nnV2(const float* sim, int* matches, float* scores,
     bool validMatch = (dist_nn0 <= ratio_thresh_sq * dist_nn1);
 
     matches[idx] = (validMatch) ? nearestNeighborIdx : -1;
-    scores[idx] = (validMatch) ? (sim_nn0 + 1) / 2.0f : 0.0f;
+    scores[idx] = (validMatch) ? (sim_nn0 + 1) * 0.5f : 0.0f;
+  }
+}
+
+__global__ void find_nnV2(const float* sim, int* matches, float* scores,
+                          const int nDescriptors0, const int nDescriptors1,
+                          const float ratio_thresh_sq) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idy = blockIdx.y * blockDim.y + threadIdx.y;
+    extern __shared__ float sharedData[]; // Shared memory for max values
+
+    if (idx < nDescriptors0 && idy < nDescriptors1) {
+        // Use shared memory to store max values
+        float* maxVals = sharedData;
+        float* secondMaxVals = sharedData + blockDim.y;
+
+        maxVals[threadIdx.y] = -1e30f;
+        secondMaxVals[threadIdx.y] = -1e30f;
+        __syncthreads();
+
+        // Iterate over the sim matrix
+        float current_sim = sim[idx * nDescriptors1 + idy];
+        if (current_sim > maxVals[threadIdx.y]) {
+            secondMaxVals[threadIdx.y] = maxVals[threadIdx.y];
+            maxVals[threadIdx.y] = current_sim;
+        } else if (current_sim > secondMaxVals[threadIdx.y]) {
+            secondMaxVals[threadIdx.y] = current_sim;
+        }
+        __syncthreads();
+
+        // Reduction to find the overall max and second max for this descriptor
+        if (threadIdx.y == 0) {
+            for (int i = 1; i < blockDim.y; ++i) {
+                if (maxVals[i] > maxVals[0]) {
+                    secondMaxVals[0] = maxVals[0];
+                    maxVals[0] = maxVals[i];
+                } else if (maxVals[i] > secondMaxVals[0]) {
+                    secondMaxVals[0] = maxVals[i];
+                }
+            }
+
+            float dist_nn0 = 2 * (1 - maxVals[0]);
+            float dist_nn1 = 2 * (1 - secondMaxVals[0]);
+            bool validMatch = (dist_nn0 <= ratio_thresh_sq * dist_nn1);
+
+            if (threadIdx.x == 0) {
+                matches[idx] = (validMatch) ? idx : -1;
+                scores[idx] = (validMatch) ? (maxVals[0] + 1) * 0.5f : 0.0f;
+            }
+        }
+    }
+}
+
+
+template <typename T>
+__global__ void find_nnV3(const T* sim, int* matches, T* scores,
+                          const int nDescriptors0, const int nDescriptors1,
+                          const T ratio_thresh_sq) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+  if (idx < nDescriptors0) {
+    T sim_nn0 = T(-1e30f);
+    T sim_nn1 = T(-1e30f);
+    int nearestNeighborIdx = -1;
+    for (int i = 0; i < nDescriptors1; ++i) {
+      T current_sim = sim[idx * nDescriptors1 + i];
+
+      if (greater(current_sim, sim_nn0)) {
+        sim_nn1 = sim_nn0;
+        sim_nn0 = current_sim;
+        nearestNeighborIdx = i;
+      } else if (greater(current_sim, sim_nn1)) {
+        sim_nn1 = current_sim;
+      }
+    
+    T dist_nn0 = T(2) * (T(1) - sim_nn0);
+    T dist_nn1 = T(2) * (T(1) - sim_nn1);
+    
+    bool validMatch = lessEqual(dist_nn0, ratio_thresh_sq * dist_nn1);
+
+    matches[idx] = (validMatch) ? nearestNeighborIdx : -1;
+    // scores[idx] = (validMatch) ? (multiply(sum(sim_nn0, T(1)), T(0.5))) : T(0);
+    }
   }
 }
 
@@ -378,21 +490,43 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
       d_descriptors0, d_descriptors1T, d_sim, d_simT, nDescriptors0, 128, 128,
       nDescriptors1, nDescriptors0, nDescriptors1);
 
-  int threadsPerBlock = TILE_WIDTH;
-  int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
-  int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
+  // int threadsPerBlock = 16;
+  // int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
+  // int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
+
+  // int sharedMemSize = threadsPerBlock * 2 * sizeof(float);
+  // int sharedMemSizeT = threadsPerBlock * 2 * sizeof(float);
+  
+  dim3 threadsPerBlock(32, 32);
+  dim3 blocksPerGrid((nDescriptors0 + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                     (nDescriptors1 + threadsPerBlock.y - 1) / threadsPerBlock.y);
+  dim3 blocksPerGridT((nDescriptors1 + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                      (nDescriptors0 + threadsPerBlock.y - 1) / threadsPerBlock.y);
+
+  int sharedMemSize = 2 * threadsPerBlock.y * sizeof(float);
+  int sharedMemSizeT = 2 * threadsPerBlock.y * sizeof(float);
 
   cudaDeviceSynchronize();
 
-  find_nnV2<<<blocksPerGrid, threadsPerBlock>>>(d_sim, d_matches0, d_scores0,
+  auto start = std::chrono::high_resolution_clock::now();
+
+  find_nnV2<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(d_sim, d_matches0, d_scores0,
                                                 nDescriptors0, nDescriptors1,
                                                 ratio_thresh_sq);
 
-  find_nnV2<<<blocksPerGridT, threadsPerBlock>>>(d_simT, d_matches1, d_scores1,
+                                                cudaDeviceSynchronize();
+
+  find_nnV2<<<blocksPerGridT, threadsPerBlock, sharedMemSizeT>>>(d_simT, d_matches1, d_scores1,
                                                  nDescriptors1, nDescriptors0,
                                                  ratio_thresh_sq);
 
   cudaDeviceSynchronize();
+
+  auto end = std::chrono::high_resolution_clock::now();
+  //elapsed in microseconds
+  std::cout << "Elapsed time for find_nnV2: "
+            << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()
+            << " microseconds" << std::endl;
 
   cudaMemcpyAsync(scores.data(), d_scores0, nDescriptors0 * sizeof(float),
                   cudaMemcpyDeviceToHost);
@@ -581,7 +715,7 @@ void featureMatchingHalf(const half* d_descriptors0, const half* d_descriptors1,
   cudaFreeAsync(d_scores1, 0);
   cudaFreeAsync(scoresFloat, 0);
 
-  mutualCheckV3<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
+  mutualCheckFast<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
                                                     nDescriptors0);
 
   cudaDeviceSynchronize();
