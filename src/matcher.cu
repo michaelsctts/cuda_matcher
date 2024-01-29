@@ -21,6 +21,28 @@
 
 #define FLOAT_LOWEST -340282346638528859811704183484516925440.0
 
+__device__ __forceinline__ float multiply(float a, float b) {
+  return __fmul_rn(a, b);
+}
+
+__device__ __forceinline__ float sum(float a, float b) {
+  return __fadd_rn(a, b);
+}
+
+#ifdef FP16
+__device__ __forceinline__ half multiply(half a, half b) {
+  return __hmul(a, b);
+}
+
+__device__ __forceinline__ half sum(half a, half b) { return __hadd(a, b); }
+
+__device__ __forceinline__ half2 multiply(half2 a, half2 b) {
+  return __hmul2(a, b);
+}
+
+__device__ __forceinline__ half2 sum(half2 a, half2 b) { return __hadd2(a, b); }
+#endif
+
 // SimilarityMatrixAndTransposeV2 is faster but this is kept for reference
 __global__ void similarityMatrixAndTranspose(
     const float* descriptors0, const float* descriptors1, int nDescriptors0,
@@ -42,18 +64,17 @@ __global__ void similarityMatrixAndTranspose(
 
 // TODO: check if pre-setting to 0.0 is faster than checking for overflow in
 // shared memory
-__global__ void matrixMultiplyShared(const float* A, const float* B, float* C,
-                                     float* CT, int numARows, int numAColumns,
-                                     int numBRows, int numBColumns,
-                                     int numCRows, int numCColumns) {
+__global__ void matrixMultiplySharedLegacy(const float* A, const float* B,
+                                           float* C, float* CT, int numARows,
+                                           int numAColumns, int numBRows,
+                                           int numBColumns, int numCRows,
+                                           int numCColumns) {
   __shared__ float sA[TILE_WIDTH][TILE_WIDTH];
   __shared__ float sB[TILE_WIDTH][TILE_WIDTH];
 
   int Row = blockDim.y * blockIdx.y + threadIdx.y;
   int Col = blockDim.x * blockIdx.x + threadIdx.x;
   float Cvalue = 0.0;
-  // sA[threadIdx.y][threadIdx.x] = 0.0;
-  // sB[threadIdx.y][threadIdx.x] = 0.0;
 
   for (int ph = 0; ph < (((numAColumns - 1) / TILE_WIDTH) + 1); ph++) {
     if ((Row < numARows) && (threadIdx.x + (ph * TILE_WIDTH)) < numAColumns) {
@@ -69,12 +90,51 @@ __global__ void matrixMultiplyShared(const float* A, const float* B, float* C,
       sB[threadIdx.y][threadIdx.x] = 0.0;
     }
     __syncthreads();
-
     for (int j = 0; j < TILE_WIDTH; ++j) {
-      Cvalue += sA[threadIdx.y][j] * sB[j][threadIdx.x];
+      Cvalue = sum(Cvalue, multiply(sA[threadIdx.y][j], sB[j][threadIdx.x]));
     }
     __syncthreads();
   }
+  if (Row < numCRows && Col < numCColumns) {
+    C[Row * numCColumns + Col] = Cvalue;
+    CT[Col * numCRows + Row] = Cvalue;
+  }
+}
+
+template <typename T>
+__global__ void matrixMultiplyShared(const T* A, const T* B, T* C, T* CT,
+                                     int numARows, int numAColumns,
+                                     int numBRows, int numBColumns,
+                                     int numCRows, int numCColumns) {
+  __shared__ T sA[TILE_WIDTH][TILE_WIDTH];
+  __shared__ T sB[TILE_WIDTH][TILE_WIDTH];
+
+  int Row = blockDim.y * blockIdx.y + threadIdx.y;
+  int Col = blockDim.x * blockIdx.x + threadIdx.x;
+  T Cvalue = 0.0;
+  int numTiles = ((numAColumns + TILE_WIDTH - 1) / TILE_WIDTH);
+
+  for (int ph = 0; ph < numTiles; ++ph) {
+    int aRow = Row;
+    int aCol = threadIdx.x + ph * TILE_WIDTH;
+    int bRow = threadIdx.y + ph * TILE_WIDTH;
+    int bCol = Col;
+
+    sA[threadIdx.y][threadIdx.x] = (aRow < numARows && aCol < numAColumns)
+                                       ? A[aRow * numAColumns + aCol]
+                                       : 0.0f;
+    sB[threadIdx.y][threadIdx.x] = (bRow < numBRows && bCol < numBColumns)
+                                       ? B[bRow * numBColumns + bCol]
+                                       : 0.0f;
+
+    __syncthreads();
+
+    for (int j = 0; j < TILE_WIDTH; ++j) {
+      Cvalue = sum(Cvalue, multiply(sA[threadIdx.y][j], sB[j][threadIdx.x]));
+    }
+    __syncwarp();
+  }
+
   if (Row < numCRows && Col < numCColumns) {
     C[Row * numCColumns + Col] = Cvalue;
     CT[Col * numCRows + Row] = Cvalue;
@@ -305,7 +365,7 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
 
   cudaDeviceSynchronize();
 
-  transpose<float><<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
+  transpose<<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
       d_descriptors1, d_descriptors1T, nDescriptors1, 128);
 
   dim3 threadsPerBlock2Dmult(TILE_WIDTH, TILE_WIDTH);
