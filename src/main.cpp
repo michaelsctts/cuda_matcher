@@ -45,7 +45,7 @@ int main(int argc, const char **argv) {
 
   program.add_argument("-t", "num_threads")
       .help("number of threads")
-      .default_value(2)
+      .default_value(1)
       .action([](const std::string &value) { return std::stoi(value); });
 
   try {
