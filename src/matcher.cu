@@ -12,6 +12,8 @@
 
 #include <cuda_runtime.h>
 
+#include <operations.cuh>
+
 #ifdef FP16
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -19,68 +21,7 @@
 
 #define TILE_WIDTH 16
 
-#define FLOAT_LOWEST -340282346638528859811704183484516925440.0
-
-__device__ __forceinline__ float multiply(float a, float b) {
-  return __fmul_rn(a, b);
-}
-
-__device__ __forceinline__ float sum(float a, float b) {
-  return __fadd_rn(a, b);
-}
-
-__device__ __forceinline__ float subtract(float a, float b) {
-  return __fsub_rn(a, b);
-}
-
-__device__ __forceinline__ bool greater(float a, float b) { return a > b; }
-
-__device__ __forceinline__ bool greaterEqual(float a, float b) {
-  return a >= b;
-}
-
-__device__ __forceinline__ bool less(float a, float b) { return a < b; }
-
-__device__ __forceinline__ bool lessEqual(float a, float b) { return a <= b; }
-
-__device__ __forceinline__ bool equal(float a, float b) { return a == b; }
-
-#ifdef FP16
-__device__ __forceinline__ half multiply(half a, half b) {
-  return __hmul(a, b);
-}
-__device__ __forceinline__ half sum(half a, half b) { return __hadd(a, b); }
-
-__device__ __forceinline__ half subtract(half a, half b) {
-  return __hsub(a, b);
-}
-
-__device__ __forceinline__ bool greater(half a, half b) { return __hgt(a, b); }
-
-__device__ __forceinline__ bool greaterEqual(half a, half b) {
-  return __hge(a, b);
-}
-
-__device__ __forceinline__ bool less(half a, half b) { return __hlt(a, b); }
-
-__device__ __forceinline__ bool lessEqual(half a, half b) {
-  return __hle(a, b);
-}
-
-__device__ __forceinline__ bool equal(half a, half b) { return __heq(a, b); }
-
-__device__ __forceinline__ half2 multiply(half2 a, half2 b) {
-  return __hmul2(a, b);
-}
-__device__ __forceinline__ half2 sum(half2 a, half2 b) { return __hadd2(a, b); }
-
-__device__ __forceinline__ half2 subtract(half2 a, half2 b) {
-  return __hsub2(a, b);
-}
-
-#endif
-
-// SimilarityMatrixAndTransposeV2 is faster but this is kept for reference
+// matrixMultiplyShared is faster but this is kept for reference
 __global__ void similarityMatrixAndTranspose(
     const float* descriptors0, const float* descriptors1, int nDescriptors0,
     const int nDescriptors1, const int descriptorDim, float* sim, float* simT) {
@@ -96,45 +37,6 @@ __global__ void similarityMatrixAndTranspose(
 
     sim[idx * nDescriptors1 + idy] = dotProduct;
     simT[idy * nDescriptors0 + idx] = dotProduct;
-  }
-}
-
-// TODO: check if pre-setting to 0.0 is faster than checking for overflow in
-// shared memory
-__global__ void matrixMultiplySharedLegacy(const float* A, const float* B,
-                                           float* C, float* CT, int numARows,
-                                           int numAColumns, int numBRows,
-                                           int numBColumns, int numCRows,
-                                           int numCColumns) {
-  __shared__ float sA[TILE_WIDTH][TILE_WIDTH];
-  __shared__ float sB[TILE_WIDTH][TILE_WIDTH];
-
-  int Row = blockDim.y * blockIdx.y + threadIdx.y;
-  int Col = blockDim.x * blockIdx.x + threadIdx.x;
-  float Cvalue = 0.0;
-
-  for (int ph = 0; ph < (((numAColumns - 1) / TILE_WIDTH) + 1); ph++) {
-    if ((Row < numARows) && (threadIdx.x + (ph * TILE_WIDTH)) < numAColumns) {
-      sA[threadIdx.y][threadIdx.x] =
-          A[(Row * numAColumns) + threadIdx.x + (ph * TILE_WIDTH)];
-    } else {
-      sA[threadIdx.y][threadIdx.x] = 0.0;
-    }
-    if (Col < numBColumns && (threadIdx.y + ph * TILE_WIDTH) < numBRows) {
-      sB[threadIdx.y][threadIdx.x] =
-          B[(threadIdx.y + ph * TILE_WIDTH) * numBColumns + Col];
-    } else {
-      sB[threadIdx.y][threadIdx.x] = 0.0;
-    }
-    __syncthreads();
-    for (int j = 0; j < TILE_WIDTH; ++j) {
-      Cvalue = sum(Cvalue, multiply(sA[threadIdx.y][j], sB[j][threadIdx.x]));
-    }
-    __syncthreads();
-  }
-  if (Row < numCRows && Col < numCColumns) {
-    C[Row * numCColumns + Col] = Cvalue;
-    CT[Col * numCRows + Row] = Cvalue;
   }
 }
 
@@ -340,74 +242,6 @@ void allocateDescriptors(float** d_descriptors,
 }
 
 void deallocateDescriptors(float* d_descriptors) { cudaFree(d_descriptors); }
-
-void featureMatchingLegacy(const float* d_descriptors0,
-                           const float* d_descriptors1,
-                           std::vector<int>& matches,
-                           std::vector<float>& scores, float ratio_thresh_sq,
-                           int nDescriptors0, int nDescriptors1) {
-  float* d_sim;
-  float* d_simT;
-
-  cudaMallocAsync(&d_sim, nDescriptors0 * nDescriptors1 * sizeof(float), 0);
-  cudaMallocAsync(&d_simT, nDescriptors0 * nDescriptors1 * sizeof(float), 0);
-
-  int *d_matches0, *d_matches1;
-  float *d_scores0, *d_scores1;
-
-  int threadsPerBlock = 128;
-  dim3 threadsPerBlock2D(8, 8);
-
-  int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
-  int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
-  dim3 blocksPerGrid2D(
-      (nDescriptors0 + threadsPerBlock2D.x - 1) / threadsPerBlock2D.x,
-      (nDescriptors1 + threadsPerBlock2D.y - 1) / threadsPerBlock2D.y);
-
-  cudaDeviceSynchronize();
-
-  cudaMallocAsync(&d_matches0, nDescriptors0 * sizeof(int), 0);
-  cudaMallocAsync(&d_matches1, nDescriptors1 * sizeof(int), 0);
-  cudaMallocAsync(&d_scores0, nDescriptors0 * sizeof(float), 0);
-  cudaMallocAsync(&d_scores1, nDescriptors1 * sizeof(float), 0);
-
-  similarityMatrixAndTransposeV2<<<blocksPerGrid2D, threadsPerBlock2D>>>(
-      d_descriptors0, d_descriptors1, nDescriptors0, nDescriptors1, 128, d_sim,
-      d_simT);
-
-  cudaDeviceSynchronize();
-
-  find_nnlegacy<<<blocksPerGrid, threadsPerBlock>>>(
-      d_sim, d_matches0, d_scores0, nDescriptors0, nDescriptors1,
-      ratio_thresh_sq);
-
-  find_nnlegacy<<<blocksPerGridT, threadsPerBlock>>>(
-      d_simT, d_matches1, d_scores1, nDescriptors1, nDescriptors0,
-      ratio_thresh_sq);
-
-  cudaDeviceSynchronize();
-
-  cudaMemcpyAsync(scores.data(), d_scores0, nDescriptors0 * sizeof(float),
-                  cudaMemcpyDeviceToHost);
-
-  cudaFreeAsync(d_sim, 0);
-  cudaFreeAsync(d_simT, 0);
-  cudaFreeAsync(d_scores1, 0);
-
-  mutualCheckFast<<<blocksPerGrid, threadsPerBlock>>>(d_matches0, d_matches1,
-                                                      nDescriptors0);
-
-  cudaDeviceSynchronize();
-
-  cudaMemcpyAsync(matches.data(), d_matches0, nDescriptors0 * sizeof(int),
-                  cudaMemcpyDeviceToHost);
-
-  cudaFreeAsync(d_matches0, 0);
-  cudaFreeAsync(d_matches1, 0);
-  cudaFreeAsync(d_scores0, 0);
-
-  cudaDeviceSynchronize();
-}
 
 void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
                      std::vector<int>& matches, std::vector<float>& scores,
