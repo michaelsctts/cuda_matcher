@@ -55,6 +55,20 @@ __device__ __forceinline__ half subtract(half a, half b) {
   return __hsub(a, b);
 }
 
+__device__ __forceinline__ bool greater(half a, half b) { return __hgt(a, b); }
+
+__device__ __forceinline__ bool greaterEqual(half a, half b) {
+  return __hge(a, b);
+}
+
+__device__ __forceinline__ bool less(half a, half b) { return __hlt(a, b); }
+
+__device__ __forceinline__ bool lessEqual(half a, half b) {
+  return __hle(a, b);
+}
+
+__device__ __forceinline__ bool equal(half a, half b) { return __heq(a, b); }
+
 __device__ __forceinline__ half2 multiply(half2 a, half2 b) {
   return __hmul2(a, b);
 }
