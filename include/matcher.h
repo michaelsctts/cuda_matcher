@@ -17,3 +17,7 @@ void allocateDescriptors(float** d_descriptors,
                          const std::vector<float>& descriptors);
 
 void deallocateDescriptors(float* d_descriptors);
+
+void initCublas();
+
+void destroyCublas();

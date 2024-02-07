@@ -21,6 +21,9 @@
 
 #define TILE_WIDTH 16
 
+// define cublashandle
+cublasHandle_t handle;
+
 // matrixMultiplyShared is faster but this is kept for reference
 __global__ void similarityMatrixAndTranspose(
     const float* descriptors0, const float* descriptors1, int nDescriptors0,
@@ -78,6 +81,29 @@ __global__ void matrixMultiplyShared(const T* A, const T* B, T* C, T* CT,
     C[Row * numCColumns + Col] = Cvalue;
     CT[Col * numCRows + Row] = Cvalue;
   }
+}
+
+void initCublas() { cublasCreate(&handle); }
+
+void destroyCublas() { cublasDestroy(handle); }
+
+void matrixMultiplyCublasSgemm(const float* A, const float* B, float* C,
+                               int numARows, int numAColumns, int numBRows,
+                               int numBColumns, int numCRows, int numCColumns) {
+  float alpha = 1.0f;
+  float beta = 0.0f;
+
+  cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, numCColumns, numCRows,
+              numAColumns, &alpha, B, numBColumns, A, numAColumns, &beta, C,
+              numCColumns);
+}
+
+void transposeCublas(const float* in, float* out, int n, int m) {
+  float alpha = 1.0f;
+  float beta = 0.0f;
+
+  cublasSgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N, n, m, &alpha, in, m, &beta, in,
+              n, out, n);
 }
 
 // tiled matmul is faster, tiling this might be faster
@@ -273,18 +299,37 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
 
   cudaDeviceSynchronize();
 
-  transpose<<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
-      d_descriptors1, d_descriptors1T, nDescriptors1, 128);
+  // transpose<<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
+  //     d_descriptors1, d_descriptors1T, nDescriptors1, 128);
+
+  transposeCublas(d_descriptors1, d_descriptors1T, nDescriptors1, 128);
 
   dim3 threadsPerBlock2Dmult(TILE_WIDTH, TILE_WIDTH);
   dim3 blocksPerGrid2Dmult((nDescriptors1 + TILE_WIDTH - 1) / TILE_WIDTH,
                            (nDescriptors0 + TILE_WIDTH - 1) / TILE_WIDTH);
 
-  cudaDeviceSynchronize();
+  // cudaDeviceSynchronize();
 
-  matrixMultiplyShared<<<blocksPerGrid2Dmult, threadsPerBlock2Dmult>>>(
-      d_descriptors0, d_descriptors1T, d_sim, d_simT, nDescriptors0, 128, 128,
-      nDescriptors1, nDescriptors0, nDescriptors1);
+  // matrixMultiplyShared<<<blocksPerGrid2Dmult, threadsPerBlock2Dmult>>>(
+  //     d_descriptors0, d_descriptors1T, d_sim, d_simT, nDescriptors0, 128,
+  //     128, nDescriptors1, nDescriptors0, nDescriptors1);
+
+  matrixMultiplyCublasSgemm(d_descriptors0, d_descriptors1T, d_sim,
+                            nDescriptors0, 128, 128, nDescriptors1,
+                            nDescriptors0, nDescriptors1);
+
+  // transpose sim for simT
+  // dim3 threadsPerBlock2DdtT(TILE_WIDTH, TILE_WIDTH);
+  // dim3 blocksPerGrid2DdtT(
+  //     (nDescriptors0 + threadsPerBlock2DdtT.x - 1) / threadsPerBlock2DdtT.x,
+  //     (nDescriptors1 + threadsPerBlock2DdtT.y - 1) / threadsPerBlock2DdtT.y);
+
+  // transpose<<<blocksPerGrid2DdtT, threadsPerBlock2DdtT>>>(
+  //     d_sim, d_simT, nDescriptors0, nDescriptors1);
+
+  transposeCublas(d_sim, d_simT, nDescriptors0, nDescriptors1);
+
+  cudaDeviceSynchronize();
 
   int threadsPerBlock = TILE_WIDTH;
   int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;

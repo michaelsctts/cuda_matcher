@@ -70,6 +70,8 @@ int main(int argc, const char **argv) {
   read_features(features_path, images, images_map);
   read_pairs(pairs_path, pairs, images_map);
 
+  initCublas();
+
   for (int i = 0; i < pairs.size(); i++) {
     pairs_parts[i % num_threads].push_back(pairs[i]);
   }
@@ -90,6 +92,7 @@ int main(int argc, const char **argv) {
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> elapsed = end - start;
 
+  destroyCublas();
   // TODO: save matches and scores
   save_matches(output_path, pairs);
 
