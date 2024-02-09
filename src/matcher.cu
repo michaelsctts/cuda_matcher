@@ -19,7 +19,7 @@
 #include <cuda_fp16.h>
 #endif
 
-#define TILE_WIDTH 16
+#define TILE_WIDTH 32
 
 // define cublashandle
 cublasHandle_t handle;
@@ -183,7 +183,7 @@ __global__ void find_nnV2legacy(const float* sim, int* matches, float* scores,
     float sim_nn0 = -1e30f;
     float sim_nn1 = -1e30f;
     int nearestNeighborIdx = -1;
-#pragma unroll 4
+#pragma unroll 32
     for (int i = 0; i < nDescriptors1; ++i) {
       float current_sim = sim[idx * nDescriptors1 + i];
 
@@ -275,14 +275,13 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
                      int nDescriptors1) {
   float* d_sim;
   float* d_simT;
+  int *d_matches0, *d_matches1;
+  float *d_scores0, *d_scores1;
 
   cudaMallocAsync(&d_sim, nDescriptors0 * nDescriptors1 * sizeof(float), 0);
   cudaMallocAsync(&d_simT, nDescriptors0 * nDescriptors1 * sizeof(float), 0);
 
-  int *d_matches0, *d_matches1;
-  float *d_scores0, *d_scores1;
-
-  cudaDeviceSynchronize();
+  // cudaDeviceSynchronize();
 
   cudaMallocAsync(&d_matches0, nDescriptors0 * sizeof(int), 0);
   cudaMallocAsync(&d_matches1, nDescriptors1 * sizeof(int), 0);
@@ -292,50 +291,19 @@ void featureMatching(const float* d_descriptors0, const float* d_descriptors1,
   float* d_descriptors1T;
   cudaMalloc(&d_descriptors1T, nDescriptors1 * 128 * sizeof(float));
 
-  dim3 threadsPerBlock2Ddt(TILE_WIDTH, TILE_WIDTH);
-  dim3 blocksPerGrid2Ddt(
-      (nDescriptors1 + threadsPerBlock2Ddt.x - 1) / threadsPerBlock2Ddt.x,
-      (128 + threadsPerBlock2Ddt.y - 1) / threadsPerBlock2Ddt.y);
-
   cudaDeviceSynchronize();
 
-  // transpose<<<blocksPerGrid2Ddt, threadsPerBlock2Ddt>>>(
-  //     d_descriptors1, d_descriptors1T, nDescriptors1, 128);
-
   transposeCublas(d_descriptors1, d_descriptors1T, nDescriptors1, 128);
-
-  dim3 threadsPerBlock2Dmult(TILE_WIDTH, TILE_WIDTH);
-  dim3 blocksPerGrid2Dmult((nDescriptors1 + TILE_WIDTH - 1) / TILE_WIDTH,
-                           (nDescriptors0 + TILE_WIDTH - 1) / TILE_WIDTH);
-
-  // cudaDeviceSynchronize();
-
-  // matrixMultiplyShared<<<blocksPerGrid2Dmult, threadsPerBlock2Dmult>>>(
-  //     d_descriptors0, d_descriptors1T, d_sim, d_simT, nDescriptors0, 128,
-  //     128, nDescriptors1, nDescriptors0, nDescriptors1);
 
   matrixMultiplyCublasSgemm(d_descriptors0, d_descriptors1T, d_sim,
                             nDescriptors0, 128, 128, nDescriptors1,
                             nDescriptors0, nDescriptors1);
 
-  // transpose sim for simT
-  // dim3 threadsPerBlock2DdtT(TILE_WIDTH, TILE_WIDTH);
-  // dim3 blocksPerGrid2DdtT(
-  //     (nDescriptors0 + threadsPerBlock2DdtT.x - 1) / threadsPerBlock2DdtT.x,
-  //     (nDescriptors1 + threadsPerBlock2DdtT.y - 1) / threadsPerBlock2DdtT.y);
-
-  // transpose<<<blocksPerGrid2DdtT, threadsPerBlock2DdtT>>>(
-  //     d_sim, d_simT, nDescriptors0, nDescriptors1);
-
   transposeCublas(d_sim, d_simT, nDescriptors0, nDescriptors1);
-
-  cudaDeviceSynchronize();
 
   int threadsPerBlock = TILE_WIDTH;
   int blocksPerGrid = (nDescriptors0 + threadsPerBlock - 1) / threadsPerBlock;
   int blocksPerGridT = (nDescriptors1 + threadsPerBlock - 1) / threadsPerBlock;
-
-  cudaDeviceSynchronize();
 
   find_nn<<<blocksPerGrid, threadsPerBlock>>>(d_sim, d_matches0, d_scores0,
                                               nDescriptors0, nDescriptors1,
